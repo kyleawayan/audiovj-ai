@@ -12,3 +12,6 @@ wheels/
 # Data and model artifacts
 /data/
 *.safetensors
+
+# Carabiner binary
+Carabiner

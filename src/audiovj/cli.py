@@ -298,3 +298,86 @@ def predict_file(
                 f"next={PHRASE_TYPES[next_idx]:<12} ({confidence_next:.0%})  "
                 f"beats_until={beats_until:.0f}"
             )
+
+
+@app.command()
+def list_devices() -> None:
+    """List available audio input devices and their channels."""
+    import sounddevice as sd
+
+    devices = sd.query_devices()
+
+    typer.echo("Audio input devices:\n")
+    for i, dev in enumerate(devices):
+        if dev["max_input_channels"] == 0:
+            continue
+        typer.echo(f"  [{i}] {dev['name']}")
+        typer.echo(f"       Inputs: {dev['max_input_channels']}  "
+                   f"Sample rate: {int(dev['default_samplerate'])}Hz")
+        n = dev["max_input_channels"]
+        if n <= 16:
+            ch_list = ", ".join(str(c) for c in range(n))
+            typer.echo(f"       Channels: {ch_list}")
+        else:
+            typer.echo(f"       Channels: 0-{n - 1}")
+        typer.echo()
+
+    typer.echo("Usage: audiovj run-live --audio-device <index|name> --audio-channels <ch,ch>")
+
+
+@app.command()
+def run_live(
+    audio_device: str = typer.Option(None, help="Audio input device name or index"),
+    audio_channels: str = typer.Option(
+        None, help="Input channels to capture, 0-indexed comma-separated (e.g. '6,7'). Max 2."
+    ),
+    checkpoint: str = typer.Option(
+        None, help="Path to model checkpoint"
+    ),
+    carabiner_host: str = typer.Option("127.0.0.1", help="Carabiner host"),
+    carabiner_port: int = typer.Option(17000, help="Carabiner port"),
+    osc_host: str = typer.Option("127.0.0.1", help="OSC destination host"),
+    osc_port: int = typer.Option(9000, help="OSC destination port"),
+    correction_threshold: float = typer.Option(0.7, help="Min confidence for phrase correction"),
+    transition_beats: float = typer.Option(4.0, help="Beats-until threshold for transition"),
+    anticipate_beats: float = typer.Option(8.0, help="Beats-until threshold for anticipation cue"),
+) -> None:
+    """Start real-time phrase detection from live audio."""
+    from audiovj.live.pipeline import LivePipeline
+
+    ckpt = Path(checkpoint) if checkpoint else MODELS_DIR / "phrase_predictor.safetensors"
+    if not ckpt.exists():
+        typer.echo(f"Error: Checkpoint not found: {ckpt}")
+        raise typer.Exit(1)
+
+    device = None
+    if audio_device is not None:
+        try:
+            device = int(audio_device)
+        except ValueError:
+            device = audio_device
+
+    channels = None
+    if audio_channels is not None:
+        try:
+            channels = [int(c.strip()) for c in audio_channels.split(",")]
+        except ValueError:
+            typer.echo("Error: Invalid channel format. Use comma-separated integers (e.g. '6,7')")
+            raise typer.Exit(1)
+        if len(channels) > 2:
+            typer.echo("Error: Max 2 audio channels supported")
+            raise typer.Exit(1)
+
+    pipeline = LivePipeline(
+        checkpoint_path=ckpt,
+        audio_device=device,
+        audio_channels=channels,
+        carabiner_host=carabiner_host,
+        carabiner_port=carabiner_port,
+        osc_host=osc_host,
+        osc_port=osc_port,
+        correction_threshold=correction_threshold,
+        transition_beats=transition_beats,
+        anticipate_beats=anticipate_beats,
+    )
+    pipeline.run()

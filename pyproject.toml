@@ -13,6 +13,8 @@ dependencies = [
     "packaging>=26.0",
     "torchcodec>=0.10.0",
     "numpy>=2.4.3",
+    "sounddevice>=0.5.5",
+    "python-osc>=1.9.3",
 ]
 
 [project.scripts]
