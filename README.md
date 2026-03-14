@@ -10,7 +10,7 @@ The goal of this project is to create a real-time DJ phrase detection system tha
 
 - Model architecture is very rough still.
 - The performance isn't great yet.
-- For tempo and phase detection, Ableton Link is used in the meantime, until I can get the phrase detection working well enough. Then, I can focus on implementing another model to track tempo and phase.
+- For tempo and phase detection, Ableton Link/[Carabiner](https://github.com/Deep-Symmetry/carabiner) is used in the meantime, until I can get the phrase detection working well enough. Then, I can focus on implementing another model to track tempo and phase.
 
 ## Pipeline
 
