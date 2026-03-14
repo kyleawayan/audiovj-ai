@@ -1,7 +1,26 @@
 [project]
 name = "audiovj-ai"
 version = "0.1.0"
-description = "Add your description here"
+description = "Real-time DJ phrase detection for lighting/visual control"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "torch",
+    "torchaudio",
+    "typer[all]",
+    "pydantic",
+    "safetensors",
+    "packaging>=26.0",
+    "torchcodec>=0.10.0",
+    "numpy>=2.4.3",
+]
+
+[project.scripts]
+audiovj = "audiovj.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/audiovj"]
