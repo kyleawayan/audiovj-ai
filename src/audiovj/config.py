@@ -22,6 +22,14 @@ CONTEXT_BEATS = 8
 DATA_DIR = Path("data")
 TRACKS_DIR = DATA_DIR / "tracks"
 FEATURES_DIR = DATA_DIR / "features"
+MODELS_DIR = DATA_DIR / "models"
+
+# Model hyperparameters
+FIXED_FRAMES = 128  # AdaptiveAvgPool1d target (normalizes variable BPM window widths)
+ENCODER_CHANNELS = [64, 128]
+LSTM_HIDDEN = 128
+LSTM_LAYERS = 2
+NUM_PHRASES = len(PHRASE_TYPES)
 
 
 def color_to_phrase(r: int, g: int, b: int) -> str | None:
