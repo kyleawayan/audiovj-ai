@@ -28,10 +28,25 @@ class PhraseStateManager:
         self._anticipate_beats = anticipate_beats
         self._running_phrase: str | None = None
         self._last_anticipation_sent: str | None = None
+        self._countdown: float | None = None
+        self._countdown_phrase: str | None = None
+        self._disagree_count: int = 0
 
     @property
     def running_phrase(self) -> str | None:
         return self._running_phrase
+
+    @property
+    def countdown(self) -> tuple[str, float] | None:
+        """Returns (phrase, beats_remaining) if a countdown is active."""
+        if self._countdown is not None and self._countdown_phrase is not None:
+            return (self._countdown_phrase, self._countdown)
+        return None
+
+    def _reset_countdown(self) -> None:
+        self._countdown = None
+        self._countdown_phrase = None
+        self._disagree_count = 0
 
     def update(self, prediction: PredictionResult) -> list[StateEvent]:
         """Process a prediction and return events to emit."""
@@ -56,6 +71,7 @@ class PhraseStateManager:
             old = self._running_phrase
             self._running_phrase = prediction.current_phrase
             self._last_anticipation_sent = None
+            self._reset_countdown()
             events.append(StateEvent(
                 kind="correction",
                 phrase=prediction.current_phrase,
@@ -63,34 +79,65 @@ class PhraseStateManager:
                 confidence=prediction.current_confidence,
             ))
 
-        # Transition: beats_until countdown reached
+        # Countdown management
+        if self._countdown is None:
+            # Latch if model predicts a different phrase with confidence
+            if (
+                prediction.next_phrase != self._running_phrase
+                and prediction.next_confidence > self._correction_threshold
+                and prediction.beats_until > self._transition_beats
+            ):
+                self._countdown = prediction.beats_until
+                self._countdown_phrase = prediction.next_phrase
+                self._disagree_count = 0
+        else:
+            # Decrement by 4 (one bar per downbeat)
+            self._countdown = max(self._countdown - 4.0, 0.0)
+
+            # Re-latch if model consistently disagrees with latched phrase
+            if (
+                prediction.next_phrase != self._countdown_phrase
+                and prediction.next_confidence > self._correction_threshold
+            ):
+                self._disagree_count += 1
+                if self._disagree_count >= 2:
+                    self._countdown = prediction.beats_until
+                    self._countdown_phrase = prediction.next_phrase
+                    self._disagree_count = 0
+            else:
+                self._disagree_count = 0
+
+        # Transition: countdown reached threshold
         if (
-            prediction.beats_until <= self._transition_beats
-            and prediction.next_phrase != self._running_phrase
-            and prediction.next_confidence > self._correction_threshold
+            self._countdown is not None
+            and self._countdown <= self._transition_beats
+            and self._countdown_phrase is not None
+            and self._countdown_phrase != self._running_phrase
         ):
             old = self._running_phrase
-            self._running_phrase = prediction.next_phrase
+            self._running_phrase = self._countdown_phrase
             self._last_anticipation_sent = None
             events.append(StateEvent(
                 kind="transition",
-                phrase=prediction.next_phrase,
+                phrase=self._countdown_phrase,
                 from_phrase=old,
                 confidence=prediction.next_confidence,
             ))
+            self._reset_countdown()
 
         # Anticipate: forward cue when approaching transition
         if (
-            prediction.beats_until <= self._anticipate_beats
-            and prediction.beats_until > self._transition_beats
-            and prediction.next_phrase != self._last_anticipation_sent
+            self._countdown is not None
+            and self._countdown <= self._anticipate_beats
+            and self._countdown > self._transition_beats
+            and self._countdown_phrase != self._last_anticipation_sent
         ):
-            self._last_anticipation_sent = prediction.next_phrase
+            self._last_anticipation_sent = self._countdown_phrase
             events.append(StateEvent(
                 kind="anticipate",
-                phrase=prediction.next_phrase,
+                phrase=self._countdown_phrase or "",
                 confidence=prediction.next_confidence,
-                beats_until=prediction.beats_until,
+                beats_until=self._countdown,
             ))
 
         return events

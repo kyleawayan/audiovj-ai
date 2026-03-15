@@ -100,6 +100,8 @@ class LivePipeline:
         self._status_running = False
         self._display_phrase = ""
         self._display_next = ""
+        self._countdown_at_downbeat: float | None = None
+        self._countdown_phrase_display: str = ""
 
     def _draw_status(self) -> None:
         """Draw the status bar on the reserved bottom 2 lines."""
@@ -114,7 +116,10 @@ class LivePipeline:
         phrase_info = ""
         if self._display_phrase:
             phrase_info = f"  Current: {self._display_phrase}"
-            if self._display_next:
+            if self._countdown_at_downbeat is not None and self._countdown_phrase_display:
+                interpolated = max(0.0, self._countdown_at_downbeat - phase)
+                phrase_info += f"   Next: {self._countdown_phrase_display} in {interpolated:.0f} beats"
+            elif self._display_next:
                 phrase_info += f"   Next: {self._display_next}"
 
         if len(channel_peaks) == 2:
@@ -175,7 +180,15 @@ class LivePipeline:
 
                 # Update status bar phrase info
                 self._display_phrase = self._state.running_phrase
-                self._display_next = f"{prediction.next_phrase} in {prediction.beats_until:.0f} beats"
+                countdown = self._state.countdown
+                if countdown:
+                    self._countdown_phrase_display = countdown[0]
+                    self._countdown_at_downbeat = countdown[1]
+                    self._display_next = f"{countdown[0]} in {countdown[1]:.0f} beats"
+                else:
+                    self._countdown_phrase_display = ""
+                    self._countdown_at_downbeat = None
+                    self._display_next = ""
 
                 # Console output
                 state_indicator = ""
