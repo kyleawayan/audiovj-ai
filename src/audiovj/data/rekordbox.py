@@ -8,7 +8,7 @@ from urllib.parse import unquote
 
 from pydantic import BaseModel
 
-from audiovj.config import color_to_phrase
+from audiovj.config import hotcue_to_phrase
 
 
 class TempoEntry(BaseModel):
@@ -20,8 +20,8 @@ class TempoEntry(BaseModel):
 
 class CuePoint(BaseModel):
     start_time: float  # seconds (Start attribute)
-    color: tuple[int, int, int]  # (R, G, B)
-    phrase_type: str  # resolved from color
+    hotcue: int  # 0=A, 1=B, 2=C, 3=D, 4=E, 5=F
+    phrase_type: str  # resolved from hot cue letter
 
 
 class Track(BaseModel):
@@ -97,31 +97,25 @@ def parse_rekordbox_xml(
                 )
             )
 
-        # Parse cue points — only keep those with recognized vocabulary colors
+        # Parse cue points — only keep hot cues (Num >= 0) with mapped letters
         cue_points: list[CuePoint] = []
         for pm_el in track_el.findall("POSITION_MARK"):
-            r_str = pm_el.get("Red")
-            g_str = pm_el.get("Green")
-            b_str = pm_el.get("Blue")
-
-            # Skip entries without color attributes
-            if r_str is None or g_str is None or b_str is None:
+            num_str = pm_el.get("Num")
+            if num_str is None:
                 continue
 
-            r, g, b = int(r_str), int(g_str), int(b_str)
-            phrase = color_to_phrase(r, g, b)
+            num = int(num_str)
+            if num < 0:  # memory cues have Num=-1
+                continue
 
+            phrase = hotcue_to_phrase(num)
             if phrase is None:
-                print(
-                    f"Warning: Unrecognized cue color ({r}, {g}, {b}) "
-                    f"in track '{track_el.get('Name', '')}', skipping"
-                )
                 continue
 
             cue_points.append(
                 CuePoint(
                     start_time=float(pm_el.get("Start", "0")),
-                    color=(r, g, b),
+                    hotcue=num,
                     phrase_type=phrase,
                 )
             )

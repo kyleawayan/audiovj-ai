@@ -20,9 +20,15 @@ The goal of this project is to create a real-time DJ phrase detection system tha
 
 2. For each song in the "audiovj" playlist,
    1. Make sure the beatgrid is accurate, including the downbeats.
-   2. Use cue points to label the start of each phrase **using the color of the cue point**. In the screenshot below, I also renamed the cue points for clarity, but note the import script only uses the color.
+   2. Use **hot cue pads** to label the start of each phrase. Each letter maps to a phrase type:
+      - **A** = intro
+      - **B** = verse
+      - **C** = buildup
+      - **D** = drop
+      - **E** = breakdown
+      - **F** = outro
 
-![rekordbox cue point colors](./rekordbox_color_map.jpg)
+      Not all cues are required per track. For example, labeling only A (intro), C (buildup), and D (drop) is fine if the track doesn't have a distinct verse or breakdown. Since each letter can only be used once per track, repeated sections (e.g., a second drop) are left unlabeled — the model is expected to generalize from the labeled instances.
 
 3. Once done, export the library to an XML file (File > Export Collection in xml format).
 

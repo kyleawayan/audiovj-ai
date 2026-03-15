@@ -1,15 +1,16 @@
 from pathlib import Path
 
-# Color-to-phrase mapping (exact RGB match — Rekordbox uses fixed colors)
-COLOR_TO_PHRASE: dict[tuple[int, int, int], str] = {
-    (222, 68, 207): "intro",
-    (48, 90, 255): "buildup",
-    (16, 177, 118): "drop",
-    (195, 175, 4): "breakdown",
-    (255, 18, 123): "outro",
+# Hot cue letter → phrase type mapping (Rekordbox hot cue slots A-F)
+HOTCUE_TO_PHRASE: dict[int, str] = {
+    0: "intro",      # A
+    1: "verse",      # B
+    2: "buildup",    # C
+    3: "drop",       # D
+    4: "breakdown",  # E
+    5: "outro",      # F
 }
 
-PHRASE_TYPES = list(dict.fromkeys(COLOR_TO_PHRASE.values()))
+PHRASE_TYPES = list(dict.fromkeys(HOTCUE_TO_PHRASE.values()))
 
 # Audio feature extraction parameters
 SAMPLE_RATE = 44100
@@ -32,6 +33,6 @@ LSTM_LAYERS = 2
 NUM_PHRASES = len(PHRASE_TYPES)
 
 
-def color_to_phrase(r: int, g: int, b: int) -> str | None:
-    """Map an exact RGB color to a phrase type. Returns None if unrecognized."""
-    return COLOR_TO_PHRASE.get((r, g, b))
+def hotcue_to_phrase(num: int) -> str | None:
+    """Map a hot cue number (0=A, 1=B, ...) to a phrase type. Returns None if unmapped."""
+    return HOTCUE_TO_PHRASE.get(num)

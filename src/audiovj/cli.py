@@ -132,7 +132,7 @@ def inspect(
             secs = cp.start_time % 60
             typer.echo(
                 f"  {mins}:{secs:05.2f}  {cp.phrase_type:<12}  "
-                f"RGB=({cp.color[0]}, {cp.color[1]}, {cp.color[2]})"
+                f"Cue {chr(65 + cp.hotcue)}"
             )
     else:
         typer.echo("\nNo cue points (unlabeled track)")
