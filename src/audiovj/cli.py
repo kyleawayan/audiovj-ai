@@ -213,6 +213,71 @@ def evaluate(
 
 
 @app.command()
+def evaluate_pipeline(
+    checkpoint: str = typer.Option(
+        None, help="Path to model checkpoint"
+    ),
+    correction_threshold: float = typer.Option(0.7, help="Min confidence for phrase correction"),
+    transition_beats: float = typer.Option(4.0, help="Beats-until threshold for transition"),
+    anticipate_beats: float = typer.Option(8.0, help="Beats-until threshold for anticipation"),
+) -> None:
+    """Evaluate model + State Manager on all labeled tracks (e2e pipeline simulation)."""
+    from audiovj.evaluate import evaluate_pipeline as _evaluate_pipeline
+
+    results = _evaluate_pipeline(
+        checkpoint=checkpoint,
+        correction_threshold=correction_threshold,
+        transition_beats=transition_beats,
+        anticipate_beats=anticipate_beats,
+    )
+
+    if not results or "error" in results[0]:
+        typer.echo(f"Error: {results[0].get('error', 'No results')}")
+        raise typer.Exit(1)
+
+    # Per-track results
+    agg_raw = 0.0
+    agg_sm = 0.0
+    agg_transitions = 0
+    agg_actual = 0
+    agg_precise = 0
+    agg_corrections = 0
+    agg_downbeats = 0
+    agg_timing_errors: list[float] = []
+
+    for r in results:
+        typer.echo(f"\n{r['name']}")
+        typer.echo(f"  Raw model accuracy:    {r['raw_accuracy']:5.1f}%")
+        typer.echo(f"  State Manager accuracy:{r['sm_accuracy']:5.1f}%")
+        typer.echo(
+            f"  Transitions: {r['transitions_fired']} fired, "
+            f"{r['actual_transitions']} actual "
+            f"({r['transition_recall']:.0f}% recall, {r['transition_precision']:.0f}% precision)"
+        )
+        typer.echo(f"  Corrections: {r['corrections']} ({r['correction_rate']:.2f}/downbeat)")
+        if r["transitions_fired"] > 0:
+            typer.echo(f"  Timing error: {r['mean_timing_error']:.1f} beats mean")
+
+        agg_raw += r["raw_accuracy"] * r["labeled_downbeats"]
+        agg_sm += r["sm_accuracy"] * r["labeled_downbeats"]
+        agg_downbeats += r["labeled_downbeats"]
+        agg_transitions += r["transitions_fired"]
+        agg_actual += r["actual_transitions"]
+        agg_corrections += r["corrections"]
+        if r["transitions_fired"] > 0:
+            agg_timing_errors.append(r["mean_timing_error"])
+
+    # Aggregate
+    typer.echo(f"\n{'─' * 50}")
+    typer.echo(f"Aggregate ({len(results)} tracks, {agg_downbeats} downbeats):")
+    typer.echo(f"  Raw accuracy: {agg_raw / max(agg_downbeats, 1):.1f}%  →  SM accuracy: {agg_sm / max(agg_downbeats, 1):.1f}%")
+    typer.echo(f"  Transitions: {agg_transitions} fired, {agg_actual} actual")
+    typer.echo(f"  Correction rate: {agg_corrections / max(agg_downbeats, 1):.2f}/downbeat")
+    if agg_timing_errors:
+        typer.echo(f"  Mean timing error: {sum(agg_timing_errors) / len(agg_timing_errors):.1f} beats")
+
+
+@app.command()
 def predict_file(
     track_id: str = typer.Argument(help="Track ID to run predictions on"),
     checkpoint: str = typer.Option(
