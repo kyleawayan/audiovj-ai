@@ -1,4 +1,4 @@
-# audiovj-ai
+# AudioVJ AI
 
 Real-time DJ phrase detection for lighting/visual control.
 
