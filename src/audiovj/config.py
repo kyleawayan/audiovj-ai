@@ -2,15 +2,15 @@ from pathlib import Path
 
 # Hot cue letter → phrase type mapping (Rekordbox hot cue slots A-F)
 HOTCUE_TO_PHRASE: dict[int, str] = {
-    0: "intro",      # A
-    1: "verse",      # B
-    2: "buildup",    # C
+    0: "other",      # A (intro)
+    1: "other",      # B (verse)
+    2: "other",      # C (buildup)
     3: "drop",       # D
-    4: "breakdown",  # E
-    5: "outro",      # F
+    4: "other",      # E (breakdown)
+    5: "other",      # F (outro)
 }
 
-PHRASE_TYPES = list(dict.fromkeys(HOTCUE_TO_PHRASE.values()))
+PHRASE_TYPES = ["other", "drop"]
 
 # Audio feature extraction parameters
 SAMPLE_RATE = 44100

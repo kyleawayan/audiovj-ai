@@ -155,6 +155,7 @@ def evaluate_pipeline(
     if not labeled:
         return [{"error": "No labeled tracks with audio found"}]
 
+    phrase_set = set(PHRASE_TYPES)
     results = []
 
     for track in labeled:
@@ -217,12 +218,15 @@ def evaluate_pipeline(
 
                 events = sm.update(prediction)
 
-                gt_phrase = lbl["current_phrase"]
+                gt_current = lbl["current_phrase"]
+                # Remap ground truth to match vocabulary
+                if gt_current not in phrase_set:
+                    gt_current = "other" if "other" in phrase_set else gt_current
                 labeled_count += 1
 
-                if prediction.current_phrase == gt_phrase:
+                if prediction.current_phrase == gt_current:
                     raw_correct += 1
-                if sm.running_phrase == gt_phrase:
+                if sm.running_phrase == gt_current:
                     sm_correct += 1
 
                 for event in events:
@@ -240,8 +244,15 @@ def evaluate_pipeline(
                                 min_dist = dist_beats
                         transition_timing_errors.append(min_dist)
 
-        # Count actual transitions (cue point boundaries)
-        actual_transitions = max(len(track.cue_points) - 1, 0)
+        # Count actual transitions (boundaries where phrase type changes in our vocabulary)
+        remapped_cues = []
+        for cp in track.cue_points:
+            remapped = cp.phrase_type if cp.phrase_type in phrase_set else "other"
+            remapped_cues.append((cp.start_time, remapped))
+        actual_transitions = sum(
+            1 for i in range(1, len(remapped_cues))
+            if remapped_cues[i][1] != remapped_cues[i - 1][1]
+        )
 
         # Transition precision: how many fired transitions were near an actual boundary?
         near_threshold = 8.0  # within 8 beats counts as "correct"
@@ -250,11 +261,13 @@ def evaluate_pipeline(
         # Transition recall: how many actual boundaries had at least one nearby fired transition?
         beat_duration = 60.0 / track.bpm
         detected_boundaries = 0
-        for ct in cue_times[1:]:  # skip first cue (no transition into it)
-            for ft in transition_fire_times:
-                if abs(ct - ft) / beat_duration <= near_threshold:
-                    detected_boundaries += 1
-                    break
+        for i in range(1, len(remapped_cues)):
+            if remapped_cues[i][1] != remapped_cues[i - 1][1]:
+                ct = remapped_cues[i][0]
+                for ft in transition_fire_times:
+                    if abs(ct - ft) / beat_duration <= near_threshold:
+                        detected_boundaries += 1
+                        break
 
         results.append({
             "track_id": track.track_id,

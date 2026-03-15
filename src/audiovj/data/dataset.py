@@ -123,12 +123,25 @@ class PhraseDataset(Dataset):
                 lbl = labels[db_idx]
                 if lbl is None:
                     continue
+                cur = lbl["current_phrase"]
+                nxt = lbl["next_phrase"]
+                # Remap unknown phrases to "other" if it exists
+                if cur not in self.phrase_to_idx:
+                    if "other" in self.phrase_to_idx:
+                        cur = "other"
+                    else:
+                        continue
+                if nxt not in self.phrase_to_idx:
+                    if "other" in self.phrase_to_idx:
+                        nxt = "other"
+                    else:
+                        continue
                 self._windows.append(windows[i])
                 self._current_phrase.append(
-                    self.phrase_to_idx[lbl["current_phrase"]]
+                    self.phrase_to_idx[cur]
                 )
                 self._next_phrase.append(
-                    self.phrase_to_idx[lbl["next_phrase"]]
+                    self.phrase_to_idx[nxt]
                 )
                 self._beats_until.append(lbl["beats_until"])
 
