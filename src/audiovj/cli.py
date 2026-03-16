@@ -204,12 +204,25 @@ def evaluate(
     typer.echo(f"Evaluation ({metrics['total_samples']} samples):")
     typer.echo(f"  Next phrase accuracy:    {metrics['next_phrase_accuracy']:.1f}%")
     typer.echo(f"  Current phrase accuracy: {metrics['current_phrase_accuracy']:.1f}%")
-    typer.echo(f"  Beats-until MAE:         {metrics['beats_until_mae']:.2f}")
+    typer.echo(f"  Beats-until MAE:         {metrics['beats_until_mae']:.2f} ({metrics['beats_until_transition_samples']} transition samples)")
     typer.echo(f"  Flip-flop rate:          {metrics['flip_flop_rate']:.1f}%")
 
-    typer.echo(f"\nPer-class accuracy (current phrase):")
-    for phrase, acc in metrics["per_class_accuracy"].items():
-        typer.echo(f"  {phrase:<12} {acc:.1f}%")
+    typer.echo(f"\nPer-class metrics (current phrase):")
+    typer.echo(f"  {'class':<12} {'acc':>6} {'prec':>6} {'rec':>6} {'F1':>6}")
+    for phrase in metrics["per_class_accuracy"]:
+        acc = metrics["per_class_accuracy"][phrase]
+        prec = metrics["per_class_precision"][phrase]
+        rec = metrics["per_class_recall"][phrase]
+        f1 = metrics["per_class_f1"][phrase]
+        typer.echo(f"  {phrase:<12} {acc:5.1f}% {prec:5.1f}% {rec:5.1f}% {f1:5.1f}%")
+
+    typer.echo(f"\nPer-class metrics (next phrase):")
+    typer.echo(f"  {'class':<12} {'prec':>6} {'rec':>6} {'F1':>6}")
+    for phrase in metrics["next_precision"]:
+        prec = metrics["next_precision"][phrase]
+        rec = metrics["next_recall"][phrase]
+        f1 = metrics["next_f1"][phrase]
+        typer.echo(f"  {phrase:<12} {prec:5.1f}% {rec:5.1f}% {f1:5.1f}%")
 
 
 @app.command()
@@ -217,14 +230,14 @@ def evaluate_pipeline(
     checkpoint: str = typer.Option(
         None, help="Path to model checkpoint"
     ),
-    correction_threshold: float = typer.Option(0.7, help="Min confidence for phrase correction"),
+    correction_threshold: float = typer.Option(0.5, help="Min confidence for phrase correction"),
     transition_beats: float = typer.Option(4.0, help="Beats-until threshold for transition"),
     anticipate_beats: float = typer.Option(8.0, help="Beats-until threshold for anticipation"),
 ) -> None:
-    """Evaluate model + State Manager on all labeled tracks (e2e pipeline simulation)."""
+    """Evaluate model + State Manager on held-out test tracks (e2e pipeline simulation)."""
     from audiovj.evaluate import evaluate_pipeline as _evaluate_pipeline
 
-    results = _evaluate_pipeline(
+    results, drop_metrics = _evaluate_pipeline(
         checkpoint=checkpoint,
         correction_threshold=correction_threshold,
         transition_beats=transition_beats,
@@ -257,6 +270,13 @@ def evaluate_pipeline(
         typer.echo(f"  Corrections: {r['corrections']} ({r['correction_rate']:.2f}/downbeat)")
         if r["transitions_fired"] > 0:
             typer.echo(f"  Timing error: {r['mean_timing_error']:.1f} beats mean")
+        if r["countdown_samples"] > 0:
+            typer.echo(
+                f"  Countdown: MAE={r['countdown_mae']:.1f} beats  "
+                f"corr={r['countdown_corr']:.2f}  "
+                f"mono={r['countdown_mono']:.0%}  "
+                f"({r['countdown_samples']} samples)"
+            )
 
         agg_raw += r["raw_accuracy"] * r["labeled_downbeats"]
         agg_sm += r["sm_accuracy"] * r["labeled_downbeats"]
@@ -269,12 +289,28 @@ def evaluate_pipeline(
 
     # Aggregate
     typer.echo(f"\n{'─' * 50}")
-    typer.echo(f"Aggregate ({len(results)} tracks, {agg_downbeats} downbeats):")
+    typer.echo(f"Aggregate ({len(results)} held-out test tracks, {agg_downbeats} downbeats):")
     typer.echo(f"  Raw accuracy: {agg_raw / max(agg_downbeats, 1):.1f}%  →  SM accuracy: {agg_sm / max(agg_downbeats, 1):.1f}%")
     typer.echo(f"  Transitions: {agg_transitions} fired, {agg_actual} actual")
     typer.echo(f"  Correction rate: {agg_corrections / max(agg_downbeats, 1):.2f}/downbeat")
     if agg_timing_errors:
         typer.echo(f"  Mean timing error: {sum(agg_timing_errors) / len(agg_timing_errors):.1f} beats")
+    typer.echo(
+        f"  Current drop:  P={drop_metrics['drop_precision']:.1f}%  "
+        f"R={drop_metrics['drop_recall']:.1f}%  "
+        f"F1={drop_metrics['drop_f1']:.1f}%"
+    )
+    typer.echo(
+        f"  Next drop:     P={drop_metrics['next_drop_precision']:.1f}%  "
+        f"R={drop_metrics['next_drop_recall']:.1f}%  "
+        f"F1={drop_metrics['next_drop_f1']:.1f}%"
+    )
+    typer.echo(
+        f"  Countdown:     MAE={drop_metrics['countdown_mae']:.1f} beats  "
+        f"corr={drop_metrics['countdown_corr']:.2f}  "
+        f"mono={drop_metrics['countdown_mono']:.0%}  "
+        f"({drop_metrics['countdown_samples']} transition samples)"
+    )
 
 
 @app.command()
@@ -403,7 +439,7 @@ def run_live(
     carabiner_port: int = typer.Option(17000, help="Carabiner port"),
     osc_host: str = typer.Option("127.0.0.1", help="OSC destination host"),
     osc_port: int = typer.Option(9000, help="OSC destination port"),
-    correction_threshold: float = typer.Option(0.7, help="Min confidence for phrase correction"),
+    correction_threshold: float = typer.Option(0.5, help="Min confidence for phrase correction"),
     transition_beats: float = typer.Option(4.0, help="Beats-until threshold for transition"),
     anticipate_beats: float = typer.Option(8.0, help="Beats-until threshold for anticipation cue"),
 ) -> None:

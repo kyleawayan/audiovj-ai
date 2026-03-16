@@ -11,13 +11,14 @@ HOTCUE_TO_PHRASE: dict[int, str] = {
 }
 
 PHRASE_TYPES = ["other", "drop"]
+DROP_LENGTH_BEATS = 32  # assumed drop duration from cue point
 
 # Audio feature extraction parameters
 SAMPLE_RATE = 44100
 N_FFT = 2048
 HOP_LENGTH = 512
 N_MELS = 128
-CONTEXT_BEATS = 8
+CONTEXT_BEATS = 16
 
 # Data paths (relative to project root)
 DATA_DIR = Path("data")
@@ -27,8 +28,8 @@ MODELS_DIR = DATA_DIR / "models"
 
 # Model hyperparameters
 FIXED_FRAMES = 128  # AdaptiveAvgPool1d target (normalizes variable BPM window widths)
-ENCODER_CHANNELS = [64, 128]
-LSTM_HIDDEN = 128
+ENCODER_CHANNELS = [32, 64]
+LSTM_HIDDEN = 64
 LSTM_LAYERS = 2
 NUM_PHRASES = len(PHRASE_TYPES)
 

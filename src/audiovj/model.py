@@ -80,7 +80,9 @@ class PhrasePredictor(nn.Module):
             hidden_size=lstm_hidden,
             num_layers=lstm_layers,
             batch_first=True,
+            dropout=0.3 if lstm_layers > 1 else 0.0,
         )
+        self.dropout = nn.Dropout(0.3)
 
         # Forward prediction head
         self.next_phrase_head = nn.Linear(lstm_hidden, num_phrases)
@@ -93,7 +95,7 @@ class PhrasePredictor(nn.Module):
         """Input: [batch, n_mels, variable_frames]."""
         encoded = self.encoder(x)  # [batch, seq_len, channels]
         lstm_out, _ = self.lstm(encoded)  # [batch, seq_len, hidden]
-        last_hidden = lstm_out[:, -1, :]  # [batch, hidden]
+        last_hidden = self.dropout(lstm_out[:, -1, :])  # [batch, hidden]
 
         return ModelOutput(
             next_phrase_logits=self.next_phrase_head(last_hidden),
