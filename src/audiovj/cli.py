@@ -2,14 +2,12 @@ from pathlib import Path
 
 import typer
 
-from audiovj.config import FEATURES_DIR, MODELS_DIR, PHRASE_TYPES, TRACKS_DIR
+from audiovj.config import FEATURES_DIR, MODELS_DIR, PHRASE_TYPES, STRUCT_DIR, TRACKS_DIR
 from audiovj.data.rekordbox import (
+    Track,
     build_downbeat_times,
     load_tracks,
-    match_audio_files,
-    parse_rekordbox_xml,
     save_tracks,
-    Track,
 )
 
 app = typer.Typer(name="audiovj", help="DJ phrase detection data pipeline")
@@ -21,43 +19,49 @@ def main() -> None:
 
 
 @app.command()
-def import_rekordbox(
-    xml_path: Path = typer.Argument(help="Path to Rekordbox XML export"),
-    audio_folder: Path = typer.Argument(
-        help="Folder containing audio files to match against"
-    ),
-    playlist: str = typer.Option(
-        "audiovj", help="Rekordbox playlist name to import from"
-    ),
+def analyze_folder(
+    audio_folder: Path = typer.Argument(help="Folder of audio files to analyze (recursive)"),
+    struct_dir: Path = typer.Option(STRUCT_DIR, help="Where to write per-track allin1 JSON outputs"),
+    force: bool = typer.Option(False, help="Re-analyze files that already have JSON output"),
 ) -> None:
-    """Import tracks from a Rekordbox XML export."""
-    if not xml_path.exists():
-        typer.echo(f"Error: XML file not found: {xml_path}")
-        raise typer.Exit(1)
+    """Run allin1 structure analysis on every audio file in a folder (recursive)."""
+    from audiovj.data.allin1_import import analyze_folder as _analyze_folder
+
     if not audio_folder.is_dir():
-        typer.echo(f"Error: Audio folder not found: {audio_folder}")
+        typer.echo(f"Error: not a directory: {audio_folder}")
         raise typer.Exit(1)
 
-    typer.echo(f"Parsing Rekordbox XML: {xml_path}")
-    tracks = parse_rekordbox_xml(xml_path, playlist=playlist)
-    typer.echo(f"Found {len(tracks)} local track(s) in playlist '{playlist}'")
+    processed, skipped, failed = _analyze_folder(audio_folder, struct_dir, force=force)
+    typer.echo(f"\nDone: {processed} processed, {skipped} skipped (cached), {failed} failed")
+    typer.echo(f"Analyses written to: {struct_dir}")
+    if failed:
+        raise typer.Exit(1)
 
+
+@app.command()
+def import_folder(
+    audio_folder: Path = typer.Argument(help="Folder of audio files (recursive)"),
+    struct_dir: Path = typer.Option(STRUCT_DIR, help="Directory containing allin1 JSON outputs"),
+) -> None:
+    """Pair audio files with their allin1 JSONs and save Tracks for training."""
+    from audiovj.data.allin1_import import import_folder as _import_folder
+
+    if not audio_folder.is_dir():
+        typer.echo(f"Error: not a directory: {audio_folder}")
+        raise typer.Exit(1)
+    if not struct_dir.is_dir():
+        typer.echo(f"Error: struct dir not found: {struct_dir}. Run analyze-folder first.")
+        raise typer.Exit(1)
+
+    tracks = _import_folder(audio_folder, struct_dir)
     if not tracks:
-        raise typer.Exit(0)
+        typer.echo("No tracks imported.")
+        raise typer.Exit(1)
 
-    typer.echo(f"Matching audio files in: {audio_folder}")
-    matched, unmatched = match_audio_files(tracks, audio_folder)
-
-    labeled = sum(1 for t in matched if t.cue_points)
-
-    typer.echo(f"\nSummary:")
-    typer.echo(f"  Matched to audio files: {len(matched)}")
-    typer.echo(f"  Unmatched (no audio):   {unmatched}")
-    typer.echo(f"  With phrase labels:     {labeled}")
-
-    if matched:
-        save_tracks(matched, TRACKS_DIR)
-        typer.echo(f"\nSaved {len(matched)} track(s) to {TRACKS_DIR}/")
+    labeled = sum(1 for t in tracks if t.cue_points)
+    save_tracks(tracks, TRACKS_DIR)
+    typer.echo(f"\nImported {len(tracks)} track(s), {labeled} with cue points")
+    typer.echo(f"Saved to {TRACKS_DIR}/")
 
 
 @app.command()
@@ -67,7 +71,7 @@ def preprocess() -> None:
 
     tracks = load_tracks(TRACKS_DIR)
     if not tracks:
-        typer.echo("No imported tracks found. Run import-rekordbox first.")
+        typer.echo("No imported tracks found. Run analyze-folder + import-folder first.")
         raise typer.Exit(1)
 
     typer.echo(f"Preprocessing {len(tracks)} track(s)...")
@@ -308,7 +312,12 @@ def predict_file(
         raise typer.Exit(1)
 
     # Load model
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
     ckpt_path = checkpoint or str(MODELS_DIR / "phrase_predictor.safetensors")
     if not Path(ckpt_path).exists():
         typer.echo(f"Error: Checkpoint not found: {ckpt_path}")

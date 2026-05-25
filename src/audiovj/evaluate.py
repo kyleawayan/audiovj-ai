@@ -25,7 +25,11 @@ def evaluate_model(
       - flip_flop_rate
       - per_class_accuracy (dict by phrase type)
     """
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    device = torch.device(
+        "cuda" if torch.cuda.is_available()
+        else "mps" if torch.backends.mps.is_available()
+        else "cpu"
+    )
 
     # Load model
     ckpt_path = checkpoint or str(MODELS_DIR / "phrase_predictor.safetensors")
@@ -140,7 +144,11 @@ def evaluate_pipeline(
     from audiovj.live.inference import PredictionResult
     from audiovj.live.state import PhraseStateManager
 
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    device = torch.device(
+        "cuda" if torch.cuda.is_available()
+        else "mps" if torch.backends.mps.is_available()
+        else "cpu"
+    )
 
     ckpt_path = checkpoint or str(MODELS_DIR / "phrase_predictor.safetensors")
     model = PhrasePredictor()

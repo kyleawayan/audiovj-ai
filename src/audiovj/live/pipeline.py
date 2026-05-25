@@ -77,7 +77,11 @@ class LivePipeline:
         transition_beats: float = 4.0,
         anticipate_beats: float = 8.0,
     ) -> None:
-        device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+        device = torch.device(
+            "cuda" if torch.cuda.is_available()
+            else "mps" if torch.backends.mps.is_available()
+            else "cpu"
+        )
         print(f"Loading model from {checkpoint_path} on {device}...")
         self._engine = InferenceEngine(checkpoint_path, device)
 

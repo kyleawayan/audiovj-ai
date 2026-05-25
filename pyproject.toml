@@ -3,16 +3,98 @@ name = "audiovj-ai"
 version = "0.1.0"
 description = "Real-time DJ phrase detection for lighting/visual control"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
+# Pins below are a known-good set for installing allin1 1.1.0 against torch 2.6.0 on Python 3.12.
+# audiovj-only deps (typer, safetensors, sounddevice, python-osc, torchcodec, pydantic) live at the end.
 dependencies = [
-    "torch",
-    "torchaudio",
+    "absl-py==2.2.2",
+    "allin1==1.1.0",
+    "antlr4-python3-runtime==4.9.3",
+    "audio-separator==0.31.0",
+    "audioread==3.0.1",
+    "beartype==0.18.5",
+    "certifi==2025.1.31",
+    "cffi==1.17.1",
+    "charset-normalizer==3.4.1",
+    "cloudpickle==3.1.1",
+    "coloredlogs==15.0.1",
+    "contourpy==1.3.2",
+    "cycler==0.12.1",
+    "Cython==3.0.12",
+    "decorator==5.2.1",
+    "demucs==4.0.1",
+    "diffq==0.2.4",
+    "dora_search==0.1.12",
+    "einops==0.8.1",
+    "ffmpeg-python==0.2.0",
+    "filelock==3.18.0",
+    "flatbuffers==25.2.10",
+    "fonttools==4.57.0",
+    "fsspec==2025.3.2",
+    "future==1.0.0",
+    "huggingface-hub==0.30.2",
+    "humanfriendly==10.0",
+    "hydra-core==1.3.2",
+    "idna==3.10",
+    "Jinja2==3.1.6",
+    "joblib==1.4.2",
+    "julius==0.2.7",
+    "kiwisolver==1.4.8",
+    "lameenc==1.8.1",
+    "lazy_loader==0.4",
+    "librosa==0.11.0",
+    "llvmlite==0.44.0",
+    "madmom @ git+https://github.com/CPJKU/madmom@27f032e8947204902c675e5e341a3faf5dc86dae",
+    "MarkupSafe==3.0.2",
+    "matplotlib==3.10.1",
+    "mido==1.3.3",
+    "ml_collections==1.0.0",
+    "mpmath==1.3.0",
+    "msgpack==1.1.0",
+    "natten==0.14.6 ; sys_platform == 'darwin'",
+    "networkx==3.4.2",
+    "numba==0.61.2",
+    "numpy==2.2.4",
+    "omegaconf==2.3.0",
+    "onnxruntime==1.21.0",
+    "openunmix==1.3.0",
+    "packaging==24.2",
+    "pillow==11.2.1",
+    "platformdirs==4.3.7",
+    "pooch==1.8.2",
+    "protobuf==6.30.2",
+    "pycparser==2.22",
+    "pydub==0.25.1",
+    "pyparsing==3.2.3",
+    "python-dateutil==2.9.0.post0",
+    "PyYAML==6.0.2",
+    "requests==2.32.3",
+    "resampy==0.4.3",
+    "retrying==1.3.4",
+    "rotary-embedding-torch==0.6.5",
+    "samplerate==0.1.0",
+    "scikit-learn==1.6.1",
+    "scipy==1.15.2",
+    "setuptools==78.1.0",
+    "six==1.17.0",
+    "soundfile==0.13.1",
+    "soxr==0.5.0.post1",
+    "submitit==1.5.2",
+    "sympy==1.13.1",
+    "threadpoolctl==3.6.0",
+    "torch==2.6.0",
+    "torchaudio==2.6.0",
+    "torchvision==0.21.0",
+    "tqdm==4.67.1",
+    "treetable==0.2.5",
+    "typing_extensions==4.13.2",
+    "urllib3==2.4.0",
+    "wheel==0.45.1",
+    # audiovj-only deps:
     "typer[all]",
     "pydantic",
     "safetensors",
-    "packaging>=26.0",
     "torchcodec>=0.10.0",
-    "numpy>=2.4.3",
     "sounddevice>=0.5.5",
     "python-osc>=1.9.3",
 ]
@@ -24,5 +106,13 @@ audiovj = "audiovj.cli:app"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/audiovj"]
+
+# natten's setup.py imports torch at build time but doesn't declare it as a build dep.
+# Inject torch (and numpy, often needed by C extensions) into natten's build env.
+[tool.uv.extra-build-dependencies]
+natten = ["torch==2.6.0", "numpy==2.2.4"]

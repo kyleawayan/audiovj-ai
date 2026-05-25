@@ -19,18 +19,17 @@ from audiovj.data.rekordbox import Track, build_downbeat_times
 def load_audio(
     audio_path: Path, sample_rate: int = SAMPLE_RATE
 ) -> tuple[torch.Tensor, float]:
-    """Load audio, convert to mono, resample. Returns (waveform, duration_sec)."""
-    waveform, sr = torchaudio.load(str(audio_path))
+    """Load audio, convert to mono, resample. Returns (waveform, duration_sec).
 
-    # Convert to mono
-    if waveform.shape[0] > 1:
-        waveform = waveform.mean(dim=0, keepdim=True)
+    Uses librosa (audioread → ffmpeg subprocess) to handle mp3/m4a/etc. —
+    torchaudio's only available backend in this env is soundfile (WAV/FLAC-only),
+    and torchcodec's bundled FFmpeg-4 libs aren't installed.
+    """
+    import librosa
+    import numpy as np
 
-    # Resample if needed
-    if sr != sample_rate:
-        resampler = torchaudio.transforms.Resample(sr, sample_rate)
-        waveform = resampler(waveform)
-
+    samples, sr = librosa.load(str(audio_path), sr=sample_rate, mono=True)
+    waveform = torch.from_numpy(samples.astype(np.float32)).unsqueeze(0)
     duration = waveform.shape[1] / sample_rate
     return waveform, duration
 

@@ -1,16 +1,17 @@
 from pathlib import Path
 
-# Hot cue letter → phrase type mapping (Rekordbox hot cue slots A-F)
-HOTCUE_TO_PHRASE: dict[int, str] = {
-    0: "intro",      # A
-    1: "verse",      # B
-    2: "buildup",    # C
-    3: "drop",       # D
-    4: "breakdown",  # E
-    5: "outro",      # F
-}
-
-PHRASE_TYPES = list(dict.fromkeys(HOTCUE_TO_PHRASE.values()))
+# Phrase vocabulary — sourced directly from allin1's segment labels.
+# allin1's `start` and `end` are sub-second markers, not musical sections; we skip them.
+PHRASE_TYPES: list[str] = [
+    "intro",
+    "verse",
+    "inst",
+    "solo",
+    "chorus",
+    "break",
+    "bridge",
+    "outro",
+]
 
 # Audio feature extraction parameters
 SAMPLE_RATE = 44100
@@ -24,15 +25,11 @@ DATA_DIR = Path("data")
 TRACKS_DIR = DATA_DIR / "tracks"
 FEATURES_DIR = DATA_DIR / "features"
 MODELS_DIR = DATA_DIR / "models"
+STRUCT_DIR = DATA_DIR / "struct"
 
 # Model hyperparameters
-FIXED_FRAMES = 128  # AdaptiveAvgPool1d target (normalizes variable BPM window widths)
+FIXED_FRAMES = 128
 ENCODER_CHANNELS = [64, 128]
 LSTM_HIDDEN = 128
 LSTM_LAYERS = 2
 NUM_PHRASES = len(PHRASE_TYPES)
-
-
-def hotcue_to_phrase(num: int) -> str | None:
-    """Map a hot cue number (0=A, 1=B, ...) to a phrase type. Returns None if unmapped."""
-    return HOTCUE_TO_PHRASE.get(num)
