@@ -51,7 +51,7 @@ dependencies = [
     "ml_collections==1.0.0",
     "mpmath==1.3.0",
     "msgpack==1.1.0",
-    "natten==0.14.6 ; sys_platform == 'darwin'",
+    "natten==0.14.6",
     "networkx==3.4.2",
     "numba==0.61.2",
     "numpy==2.2.4",
