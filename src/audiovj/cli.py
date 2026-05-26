@@ -2,15 +2,22 @@ from pathlib import Path
 
 import typer
 
-from audiovj.config import FEATURES_DIR, MODELS_DIR, PHRASE_TYPES, TRACKS_DIR
+from audiovj.config import (
+    FEATURES_DIR,
+    MODELS_DIR,
+    PHRASE_TYPES,
+    TRACKS_DIR,
+    TRACKS_VALIDATION_DIR,
+)
 from audiovj.data.rekordbox import (
+    Track,
     build_downbeat_times,
     load_tracks,
-    match_audio_files,
-    parse_rekordbox_xml,
     save_tracks,
-    Track,
 )
+
+DEFAULT_RAVEFORM_DIR = Path("data/raveform")
+DEFAULT_AUDIO_DIR = Path("data/audio")
 
 app = typer.Typer(name="audiovj", help="DJ phrase detection data pipeline")
 
@@ -21,43 +28,51 @@ def main() -> None:
 
 
 @app.command()
-def import_rekordbox(
-    xml_path: Path = typer.Argument(help="Path to Rekordbox XML export"),
-    audio_folder: Path = typer.Argument(
-        help="Folder containing audio files to match against"
-    ),
-    playlist: str = typer.Option(
-        "audiovj", help="Rekordbox playlist name to import from"
-    ),
+def raveform_import(
+    raveform_dir: Path = typer.Option(DEFAULT_RAVEFORM_DIR, help="Root of Raveform dataset"),
+    audio_dir: Path = typer.Option(DEFAULT_AUDIO_DIR, help="Where audio files live"),
+    limit: int = typer.Option(None, help="Cap number of tracks (smoke runs)"),
 ) -> None:
-    """Import tracks from a Rekordbox XML export."""
-    if not xml_path.exists():
-        typer.echo(f"Error: XML file not found: {xml_path}")
-        raise typer.Exit(1)
-    if not audio_folder.is_dir():
-        typer.echo(f"Error: Audio folder not found: {audio_folder}")
-        raise typer.Exit(1)
+    """Build Track records from Raveform metadata + locally-available audio."""
+    from audiovj.data.raveform_import import import_raveform
 
-    typer.echo(f"Parsing Rekordbox XML: {xml_path}")
-    tracks = parse_rekordbox_xml(xml_path, playlist=playlist)
-    typer.echo(f"Found {len(tracks)} local track(s) in playlist '{playlist}'")
+    tracks, missing, no_cues = import_raveform(raveform_dir, audio_dir, limit=limit)
+    typer.echo(
+        f"Imported {len(tracks)} tracks  "
+        f"(skipped {missing} missing audio, {no_cues} without cues)"
+    )
 
     if not tracks:
-        raise typer.Exit(0)
+        raise typer.Exit(1)
 
-    typer.echo(f"Matching audio files in: {audio_folder}")
-    matched, unmatched = match_audio_files(tracks, audio_folder)
+    save_tracks(tracks, TRACKS_DIR)
+    typer.echo(f"Saved to {TRACKS_DIR}/")
 
-    labeled = sum(1 for t in matched if t.cue_points)
 
-    typer.echo(f"\nSummary:")
-    typer.echo(f"  Matched to audio files: {len(matched)}")
-    typer.echo(f"  Unmatched (no audio):   {unmatched}")
-    typer.echo(f"  With phrase labels:     {labeled}")
+@app.command()
+def migrate_rekordbox_labels(
+    source_dir: Path = typer.Argument(help="Old Track JSON dir from `experiment/binary-drop-detection` branch"),
+    target_dir: Path = typer.Option(TRACKS_VALIDATION_DIR, help="Where validation Tracks go"),
+    audio_path_from: str = typer.Option("", help="If audio_path strings need prefix substitution: replace this..."),
+    audio_path_to: str = typer.Option("", help="...with this (e.g. --from /old/prefix --to /new/prefix)"),
+) -> None:
+    """Migrate archived Rekordbox-format Tracks into a Raveform-vocab validation set."""
+    from audiovj.data.migrate_rekordbox import migrate_folder
 
-    if matched:
-        save_tracks(matched, TRACKS_DIR)
-        typer.echo(f"\nSaved {len(matched)} track(s) to {TRACKS_DIR}/")
+    if not source_dir.exists():
+        typer.echo(f"Error: source dir not found: {source_dir}")
+        raise typer.Exit(1)
+
+    kept, skipped, audio_missing = migrate_folder(
+        source_dir, target_dir,
+        audio_path_from=audio_path_from or None,
+        audio_path_to=audio_path_to or None,
+    )
+    typer.echo(
+        f"Migrated {kept} tracks  (skipped {skipped} with no usable cues)  "
+        f"({audio_missing} had missing audio locally)"
+    )
+    typer.echo(f"Saved to {target_dir}/")
 
 
 @app.command()
@@ -67,7 +82,7 @@ def preprocess() -> None:
 
     tracks = load_tracks(TRACKS_DIR)
     if not tracks:
-        typer.echo("No imported tracks found. Run import-rekordbox first.")
+        typer.echo("No imported tracks found. Run raveform-import first.")
         raise typer.Exit(1)
 
     typer.echo(f"Preprocessing {len(tracks)} track(s)...")
@@ -100,7 +115,7 @@ def inspect(
     track_path = TRACKS_DIR / f"{track_id}.json"
     if not track_path.exists():
         typer.echo(f"Error: Track not found: {track_id}")
-        typer.echo(f"Available tracks:")
+        typer.echo("Available tracks:")
         for p in sorted(TRACKS_DIR.glob("*.json")):
             t = Track.model_validate_json(p.read_text())
             typer.echo(f"  {t.track_id}  {t.artist} - {t.name}")
@@ -114,16 +129,6 @@ def inspect(
     typer.echo(f"  Audio:    {track.audio_path or 'not matched'}")
     typer.echo(f"  Filename: {track.filename}")
 
-    # Beat grid
-    typer.echo(f"\nBeat Grid ({len(track.tempo_entries)} entries):")
-    for te in track.tempo_entries[:5]:
-        typer.echo(
-            f"  {te.start_time:.3f}s  BPM={te.bpm}  "
-            f"{te.time_signature}  beat={te.beat_position}"
-        )
-    if len(track.tempo_entries) > 5:
-        typer.echo(f"  ... and {len(track.tempo_entries) - 5} more")
-
     # Cue points
     if track.cue_points:
         typer.echo(f"\nCue Points ({len(track.cue_points)}):")
@@ -131,8 +136,7 @@ def inspect(
             mins = int(cp.start_time // 60)
             secs = cp.start_time % 60
             typer.echo(
-                f"  {mins}:{secs:05.2f}  {cp.phrase_type:<12}  "
-                f"Cue {chr(65 + cp.hotcue)}"
+                f"  {mins}:{secs:05.2f}  {cp.phrase_type:<12}  hotcue={cp.hotcue}"
             )
     else:
         typer.echo("\nNo cue points (unlabeled track)")
@@ -142,7 +146,7 @@ def inspect(
     if features_path.exists():
         data = load_file(str(features_path))
         windows = data["windows"]
-        typer.echo(f"\nPreprocessed Features:")
+        typer.echo("\nPreprocessed Features:")
         typer.echo(f"  Windows: {windows.shape[0]}")
         typer.echo(f"  Shape:   {list(windows.shape)}")
     else:
@@ -207,16 +211,14 @@ def evaluate(
     typer.echo(f"  Beats-until MAE:         {metrics['beats_until_mae']:.2f}")
     typer.echo(f"  Flip-flop rate:          {metrics['flip_flop_rate']:.1f}%")
 
-    typer.echo(f"\nPer-class accuracy (current phrase):")
+    typer.echo("\nPer-class accuracy (current phrase):")
     for phrase, acc in metrics["per_class_accuracy"].items():
         typer.echo(f"  {phrase:<12} {acc:.1f}%")
 
 
 @app.command()
 def evaluate_pipeline(
-    checkpoint: str = typer.Option(
-        None, help="Path to model checkpoint"
-    ),
+    checkpoint: str = typer.Option(None, help="Path to model checkpoint"),
     correction_threshold: float = typer.Option(0.7, help="Min confidence for phrase correction"),
     transition_beats: float = typer.Option(4.0, help="Beats-until threshold for transition"),
     anticipate_beats: float = typer.Option(8.0, help="Beats-until threshold for anticipation"),
@@ -235,12 +237,10 @@ def evaluate_pipeline(
         typer.echo(f"Error: {results[0].get('error', 'No results')}")
         raise typer.Exit(1)
 
-    # Per-track results
     agg_raw = 0.0
     agg_sm = 0.0
     agg_transitions = 0
     agg_actual = 0
-    agg_precise = 0
     agg_corrections = 0
     agg_downbeats = 0
     agg_timing_errors: list[float] = []
@@ -267,22 +267,60 @@ def evaluate_pipeline(
         if r["transitions_fired"] > 0:
             agg_timing_errors.append(r["mean_timing_error"])
 
-    # Aggregate
     typer.echo(f"\n{'─' * 50}")
     typer.echo(f"Aggregate ({len(results)} tracks, {agg_downbeats} downbeats):")
-    typer.echo(f"  Raw accuracy: {agg_raw / max(agg_downbeats, 1):.1f}%  →  SM accuracy: {agg_sm / max(agg_downbeats, 1):.1f}%")
+    typer.echo(
+        f"  Raw accuracy: {agg_raw / max(agg_downbeats, 1):.1f}%  →  "
+        f"SM accuracy: {agg_sm / max(agg_downbeats, 1):.1f}%"
+    )
     typer.echo(f"  Transitions: {agg_transitions} fired, {agg_actual} actual")
     typer.echo(f"  Correction rate: {agg_corrections / max(agg_downbeats, 1):.2f}/downbeat")
     if agg_timing_errors:
         typer.echo(f"  Mean timing error: {sum(agg_timing_errors) / len(agg_timing_errors):.1f} beats")
 
 
+@app.command(name="validate-on-old-binary-drop-detection-see-experiment-binary-drop-detection-branch")
+def validate_on_old_binary_drop_detection_see_experiment_binary_drop_detection_branch() -> None:
+    """Pointer: this lived in the pre-Raveform manual-drop-label era. See branch `experiment/binary-drop-detection`."""
+    typer.echo("See branch: experiment/binary-drop-detection")
+
+
+@app.command()
+def predict_folder(
+    folder: Path = typer.Argument(help="Folder of audio files (recursive)"),
+    out_dir: Path = typer.Option(Path("data/predictions"), help="Where to write per-track JSON"),
+    checkpoint: Path = typer.Option(None, help="Path to model checkpoint"),
+    correction_threshold: float = typer.Option(0.7, help="Min confidence for SM phrase correction"),
+    transition_beats: float = typer.Option(4.0, help="SM transition beats threshold"),
+    anticipate_beats: float = typer.Option(8.0, help="SM anticipation beats threshold"),
+    force: bool = typer.Option(False, help="Re-predict files that already have output"),
+) -> None:
+    """Run model + State Manager on every audio file in a folder; dump predictions to JSON."""
+    from audiovj.predict_folder import predict_folder as _predict_folder
+
+    if not folder.is_dir():
+        typer.echo(f"Error: not a directory: {folder}")
+        raise typer.Exit(1)
+
+    processed, skipped, failed = _predict_folder(
+        folder=folder,
+        out_dir=out_dir,
+        checkpoint=checkpoint,
+        correction_threshold=correction_threshold,
+        transition_beats=transition_beats,
+        anticipate_beats=anticipate_beats,
+        skip_existing=not force,
+    )
+    typer.echo(f"\nDone: {processed} processed, {skipped} skipped, {failed} failed")
+    typer.echo(f"Predictions written to: {out_dir}/")
+    if failed:
+        raise typer.Exit(1)
+
+
 @app.command()
 def predict_file(
     track_id: str = typer.Argument(help="Track ID to run predictions on"),
-    checkpoint: str = typer.Option(
-        None, help="Path to model checkpoint"
-    ),
+    checkpoint: str = typer.Option(None, help="Path to model checkpoint"),
 ) -> None:
     """Run phrase predictions on a track, emulating real-time left-to-right processing."""
     import torch
@@ -296,7 +334,6 @@ def predict_file(
     )
     from audiovj.model import PhrasePredictor
 
-    # Load track
     track_path = TRACKS_DIR / f"{track_id}.json"
     if not track_path.exists():
         typer.echo(f"Error: Track not found: {track_id}")
@@ -307,8 +344,13 @@ def predict_file(
         typer.echo("Error: Audio file not found")
         raise typer.Exit(1)
 
-    # Load model
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+
     ckpt_path = checkpoint or str(MODELS_DIR / "phrase_predictor.safetensors")
     if not Path(ckpt_path).exists():
         typer.echo(f"Error: Checkpoint not found: {ckpt_path}")
@@ -320,7 +362,6 @@ def predict_file(
     model.to(device)
     model.eval()
 
-    # Load audio and compute mel-spectrogram
     waveform, duration = load_audio(Path(track.audio_path))
     mel_spec = extract_mel_spectrogram(waveform)
     downbeats = build_downbeat_times(track, total_duration=duration)
@@ -329,15 +370,12 @@ def predict_file(
     typer.echo(f"BPM: {track.bpm}  Downbeats: {len(downbeats)}")
     typer.echo()
 
-    # Process each downbeat left-to-right (causal)
     with torch.no_grad():
         for i, t in enumerate(downbeats):
-            # Slice a single window ending at this downbeat
             window, _ = slice_beat_windows(mel_spec, [t], track.bpm)
             if window.shape[0] == 0:
                 continue
 
-            # Pad to multiple of FIXED_FRAMES for MPS compatibility
             frames = window.shape[-1]
             pad_to = ((frames + FIXED_FRAMES - 1) // FIXED_FRAMES) * FIXED_FRAMES
             if pad_to > frames:
@@ -377,8 +415,10 @@ def list_devices() -> None:
         if dev["max_input_channels"] == 0:
             continue
         typer.echo(f"  [{i}] {dev['name']}")
-        typer.echo(f"       Inputs: {dev['max_input_channels']}  "
-                   f"Sample rate: {int(dev['default_samplerate'])}Hz")
+        typer.echo(
+            f"       Inputs: {dev['max_input_channels']}  "
+            f"Sample rate: {int(dev['default_samplerate'])}Hz"
+        )
         n = dev["max_input_channels"]
         if n <= 16:
             ch_list = ", ".join(str(c) for c in range(n))
@@ -396,9 +436,7 @@ def run_live(
     audio_channels: str = typer.Option(
         None, help="Input channels to capture, 0-indexed comma-separated (e.g. '6,7'). Max 2."
     ),
-    checkpoint: str = typer.Option(
-        None, help="Path to model checkpoint"
-    ),
+    checkpoint: str = typer.Option(None, help="Path to model checkpoint"),
     carabiner_host: str = typer.Option("127.0.0.1", help="Carabiner host"),
     carabiner_port: int = typer.Option(17000, help="Carabiner port"),
     osc_host: str = typer.Option("127.0.0.1", help="OSC destination host"),

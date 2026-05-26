@@ -115,10 +115,13 @@ class PhraseLoss(nn.Module):
 
 def _get_device() -> torch.device:
     """Select best available device, logging explicitly."""
+    if torch.cuda.is_available():
+        print(f"Using device: CUDA ({torch.cuda.get_device_name(0)})")
+        return torch.device("cuda")
     if torch.backends.mps.is_available():
         print("Using device: MPS (Apple Silicon)")
         return torch.device("mps")
-    print("WARNING: MPS not available, falling back to CPU")
+    print("WARNING: no GPU available, falling back to CPU")
     return torch.device("cpu")
 
 

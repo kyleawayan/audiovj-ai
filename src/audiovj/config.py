@@ -1,16 +1,18 @@
 from pathlib import Path
 
-# Hot cue letter → phrase type mapping (Rekordbox hot cue slots A-F)
-HOTCUE_TO_PHRASE: dict[int, str] = {
-    0: "intro",      # A
-    1: "verse",      # B
-    2: "buildup",    # C
-    3: "drop",       # D
-    4: "breakdown",  # E
-    5: "outro",      # F
-}
-
-PHRASE_TYPES = list(dict.fromkeys(HOTCUE_TO_PHRASE.values()))
+# Raveform EDM structure vocabulary (all 10 labels present in segments.json)
+PHRASE_TYPES: list[str] = [
+    "intro",
+    "altintro",
+    "buildup",
+    "drop",
+    "breakdown",
+    "bridge",
+    "cooldown",
+    "outro",
+    "altoutro",
+    "end",
+]
 
 # Audio feature extraction parameters
 SAMPLE_RATE = 44100
@@ -22,6 +24,7 @@ CONTEXT_BEATS = 8
 # Data paths (relative to project root)
 DATA_DIR = Path("data")
 TRACKS_DIR = DATA_DIR / "tracks"
+TRACKS_VALIDATION_DIR = DATA_DIR / "tracks_validation"
 FEATURES_DIR = DATA_DIR / "features"
 MODELS_DIR = DATA_DIR / "models"
 
@@ -31,8 +34,3 @@ ENCODER_CHANNELS = [64, 128]
 LSTM_HIDDEN = 128
 LSTM_LAYERS = 2
 NUM_PHRASES = len(PHRASE_TYPES)
-
-
-def hotcue_to_phrase(num: int) -> str | None:
-    """Map a hot cue number (0=A, 1=B, ...) to a phrase type. Returns None if unmapped."""
-    return HOTCUE_TO_PHRASE.get(num)
