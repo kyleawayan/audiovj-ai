@@ -1,5 +1,7 @@
 """Training loop: loss function, SpecAugment, and train_model entry point."""
 
+import time
+
 import torch
 import torch.nn as nn
 from safetensors.torch import save_file
@@ -184,9 +186,18 @@ def train_model(
     lr_patience: int = 5,
     lr_factor: float = 0.5,
     class_weight_cap: float = 5.0,
-    f1_save_threshold: float = 0.4,
+    f1_save_threshold: float = 0.0,
+    num_workers: int = 4,
+    prefetch_factor: int = 4,
+    log_interval: int = 200,
 ) -> None:
-    """Full training loop: split data, train, save best checkpoint by macro-F1."""
+    """Full training loop: split data, train, save best checkpoint by macro-F1.
+
+    Data loading is parallelized (num_workers) and overlapped with GPU compute
+    (pin_memory + prefetch): the model is tiny, so wall-clock is dominated by the
+    data pipeline, not GPU compute. In-epoch progress logs every log_interval
+    batches. f1_save_threshold=0 always keeps the best checkpoint seen.
+    """
     device = _get_device()
 
     # Data splits
@@ -223,13 +234,22 @@ def train_model(
         sample_weights, num_samples=len(train_ds), replacement=True
     )
 
+    # Parallel + overlapped loading. The feature set (mmap'd safetensors) is far
+    # larger than RAM, so workers prefetch/fault the next batch while the GPU runs.
+    loader_kwargs: dict = {"collate_fn": _collate_variable_width}
+    if num_workers > 0:
+        loader_kwargs.update(
+            num_workers=num_workers,
+            pin_memory=(device.type == "cuda"),
+            persistent_workers=True,
+            prefetch_factor=prefetch_factor,
+        )
+
     train_loader = DataLoader(
-        train_ds, batch_size=batch_size, sampler=sampler, collate_fn=_collate_variable_width
+        train_ds, batch_size=batch_size, sampler=sampler, **loader_kwargs
     )
     val_loader = (
-        DataLoader(val_ds, batch_size=batch_size, collate_fn=_collate_variable_width)
-        if val_ds
-        else None
+        DataLoader(val_ds, batch_size=batch_size, **loader_kwargs) if val_ds else None
     )
 
     # Model, loss, optimizer, scheduler
@@ -256,12 +276,15 @@ def train_model(
         augment.train()
         train_loss = 0.0
         train_batches = 0
+        total_batches = len(train_loader)
+        samples_seen = 0
+        epoch_t0 = time.time()
 
         for windows, current_idx, next_idx, beats_until in train_loader:
-            windows = augment(windows.to(device))
-            current_idx = current_idx.to(device)
-            next_idx = next_idx.to(device)
-            beats_until = beats_until.float().to(device)
+            windows = augment(windows.to(device, non_blocking=True))
+            current_idx = current_idx.to(device, non_blocking=True)
+            next_idx = next_idx.to(device, non_blocking=True)
+            beats_until = beats_until.float().to(device, non_blocking=True)
 
             out = model(windows)
             loss = criterion(
@@ -280,6 +303,18 @@ def train_model(
 
             train_loss += loss.item()
             train_batches += 1
+            samples_seen += windows.shape[0]
+
+            if log_interval and train_batches % log_interval == 0:
+                elapsed = time.time() - epoch_t0
+                sps = samples_seen / max(elapsed, 1e-6)
+                eta = elapsed / max(train_batches, 1) * (total_batches - train_batches)
+                print(
+                    f"  epoch {epoch:3d} [{train_batches:>5d}/{total_batches}] "
+                    f"loss={train_loss / train_batches:.3f}  "
+                    f"{sps:,.0f} samp/s  ETA {eta:4.0f}s",
+                    flush=True,
+                )
 
         avg_train = train_loss / max(train_batches, 1)
 
@@ -360,6 +395,6 @@ def train_model(
             # No val set — save every epoch
             save_file(model.state_dict(), str(checkpoint_path))
 
-        print(f"Epoch {epoch:3d}/{epochs}  train_loss={avg_train:.4f}{val_msg}")
+        print(f"Epoch {epoch:3d}/{epochs}  train_loss={avg_train:.4f}{val_msg}", flush=True)
 
     print(f"\nTraining complete. Best checkpoint: {checkpoint_path}  best_macro_f1={best_macro_f1:.3f}")

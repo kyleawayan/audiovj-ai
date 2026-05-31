@@ -188,8 +188,11 @@ def train(
     lr_factor: float = typer.Option(0.5, help="ReduceLROnPlateau decay factor"),
     class_weight_cap: float = typer.Option(5.0, help="Cap on inverse-freq class weights"),
     f1_save_threshold: float = typer.Option(
-        0.4, help="Minimum macro-F1 before checkpoint saves start"
+        0.0, help="Minimum macro-F1 before checkpoint saves (0 = always keep best)"
     ),
+    num_workers: int = typer.Option(4, help="DataLoader worker processes (RAM-bound)"),
+    prefetch_factor: int = typer.Option(4, help="Batches prefetched per worker"),
+    log_interval: int = typer.Option(200, help="Log in-epoch progress every N batches"),
 ) -> None:
     """Train the phrase predictor model."""
     from audiovj.training import train_model
@@ -203,6 +206,9 @@ def train(
         lr_factor=lr_factor,
         class_weight_cap=class_weight_cap,
         f1_save_threshold=f1_save_threshold,
+        num_workers=num_workers,
+        prefetch_factor=prefetch_factor,
+        log_interval=log_interval,
     )
 
 
