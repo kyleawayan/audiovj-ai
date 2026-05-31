@@ -252,8 +252,11 @@ def evaluate_pipeline(
     correction_threshold: float = typer.Option(0.7, help="Min confidence for phrase correction"),
     transition_beats: float = typer.Option(4.0, help="Beats-until threshold for transition"),
     anticipate_beats: float = typer.Option(8.0, help="Beats-until threshold for anticipation"),
+    limit: int = typer.Option(
+        None, help="Cap number of tracks (quick eval; default all). Each track re-decodes its WAV."
+    ),
 ) -> None:
-    """Evaluate model + State Manager on all labeled tracks (e2e pipeline simulation)."""
+    """Evaluate model + State Manager on labeled tracks (e2e pipeline simulation)."""
     from audiovj.evaluate import evaluate_pipeline as _evaluate_pipeline
 
     results = _evaluate_pipeline(
@@ -261,6 +264,7 @@ def evaluate_pipeline(
         correction_threshold=correction_threshold,
         transition_beats=transition_beats,
         anticipate_beats=anticipate_beats,
+        limit=limit,
     )
 
     if not results or "error" in results[0]:

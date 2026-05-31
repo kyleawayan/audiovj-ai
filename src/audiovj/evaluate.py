@@ -131,11 +131,14 @@ def evaluate_pipeline(
     correction_threshold: float = 0.7,
     transition_beats: float = 4.0,
     anticipate_beats: float = 8.0,
+    limit: int | None = None,
 ) -> list[dict]:
-    """Evaluate the full pipeline (model + State Manager) on all labeled tracks.
+    """Evaluate the full pipeline (model + State Manager) on labeled tracks.
 
     Processes each track left-to-right through the model and State Manager,
-    comparing running_phrase against ground-truth cue points.
+    comparing running_phrase against ground-truth cue points. `limit` caps the
+    number of tracks (quick eval); each track re-decodes its WAV + mel-spec, so
+    a full pass over the corpus is slow.
 
     Returns a list of per-track metric dicts.
     """
@@ -165,9 +168,15 @@ def evaluate_pipeline(
     if not labeled:
         return [{"error": "No labeled tracks with audio found"}]
 
-    results = []
+    if limit is not None:
+        labeled = labeled[:limit]
 
-    for track in labeled:
+    results = []
+    total = len(labeled)
+
+    for i, track in enumerate(labeled, 1):
+        if i == 1 or i % 25 == 0 or i == total:
+            print(f"  [pipeline] {i}/{total} tracks...", flush=True)
         waveform, duration = load_audio(Path(track.audio_path))
         mel_spec = extract_mel_spectrogram(waveform)
         downbeats = build_downbeat_times(track, total_duration=duration)
