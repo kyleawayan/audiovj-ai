@@ -62,8 +62,8 @@ variable "image_project" {
 
 variable "image_family" {
   type        = string
-  description = "Boot image family. CUDA 12.4 base on Debian."
-  default     = "common-cu124-debian-11"
+  description = "Boot image family. CUDA base on Ubuntu 22.04 with the NVIDIA driver preinstalled. List options: gcloud compute images list --project deeplearning-platform-release --filter='family~common-cu'"
+  default     = "common-cu129-ubuntu-2204-nvidia-580"
 }
 
 variable "use_spot" {

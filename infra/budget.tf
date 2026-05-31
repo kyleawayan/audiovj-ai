@@ -32,7 +32,7 @@ resource "google_billing_budget" "budget" {
     threshold_percent = 1.0
   }
 
-  all_updates_rule {
-    disable_default_iam_recipients = false
-  }
+  # No all_updates_rule block: threshold alerts then default to the billing
+  # account's IAM recipients (Billing Admins/Users). Avoids a Monitoring channel
+  # or Pub/Sub topic, keeping the project's API surface minimal.
 }
