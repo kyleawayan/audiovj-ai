@@ -183,11 +183,27 @@ def train(
     epochs: int = typer.Option(50, help="Number of training epochs"),
     batch_size: int = typer.Option(8, help="Batch size"),
     lr: float = typer.Option(1e-3, help="Learning rate"),
+    grad_clip: float = typer.Option(1.0, help="Gradient norm clip"),
+    lr_patience: int = typer.Option(5, help="ReduceLROnPlateau patience (epochs)"),
+    lr_factor: float = typer.Option(0.5, help="ReduceLROnPlateau decay factor"),
+    class_weight_cap: float = typer.Option(5.0, help="Cap on inverse-freq class weights"),
+    f1_save_threshold: float = typer.Option(
+        0.4, help="Minimum macro-F1 before checkpoint saves start"
+    ),
 ) -> None:
     """Train the phrase predictor model."""
     from audiovj.training import train_model
 
-    train_model(epochs=epochs, batch_size=batch_size, lr=lr)
+    train_model(
+        epochs=epochs,
+        batch_size=batch_size,
+        lr=lr,
+        grad_clip=grad_clip,
+        lr_patience=lr_patience,
+        lr_factor=lr_factor,
+        class_weight_cap=class_weight_cap,
+        f1_save_threshold=f1_save_threshold,
+    )
 
 
 @app.command()
