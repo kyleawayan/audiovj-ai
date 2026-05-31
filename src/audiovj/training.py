@@ -190,6 +190,9 @@ def train_model(
     num_workers: int = 4,
     prefetch_factor: int = 4,
     log_interval: int = 200,
+    balance: str = "sampler",
+    dropout: float = 0.3,
+    weight_decay: float = 1e-4,
 ) -> None:
     """Full training loop: split data, train, save best checkpoint by macro-F1.
 
@@ -227,13 +230,6 @@ def train_model(
         count = sum(1 for c in train_ds._current_phrase if c == i)
         print(f"  {p:<10} count={count:>6}  weight={class_weights[i].item():.3f}")
 
-    # WeightedRandomSampler: per-sample weight = class weight of its current_phrase.
-    # Rebalances the per-batch class distribution so rare classes appear more often.
-    sample_weights = [class_weights[c].item() for c in train_ds._current_phrase]
-    sampler = WeightedRandomSampler(
-        sample_weights, num_samples=len(train_ds), replacement=True
-    )
-
     # Parallel + overlapped loading. The feature set (mmap'd safetensors) is far
     # larger than RAM, so workers prefetch/fault the next batch while the GPU runs.
     loader_kwargs: dict = {"collate_fn": _collate_variable_width}
@@ -245,18 +241,41 @@ def train_model(
             prefetch_factor=prefetch_factor,
         )
 
-    train_loader = DataLoader(
-        train_ds, batch_size=batch_size, sampler=sampler, **loader_kwargs
-    )
+    # Single balancing mechanism. Applying BOTH a weighted sampler AND weighted
+    # loss double-corrects: it suppresses the majority class (drop) in both the
+    # data distribution and the gradient, collapsing its F1. Pick exactly one.
+    #   sampler -> WeightedRandomSampler + unweighted CE
+    #   loss    -> natural distribution + class-weighted CE
+    #   none    -> natural distribution + unweighted CE
+    loss_class_weights = None
+    if balance == "sampler":
+        sample_weights = [class_weights[c].item() for c in train_ds._current_phrase]
+        sampler = WeightedRandomSampler(
+            sample_weights, num_samples=len(train_ds), replacement=True
+        )
+        train_loader = DataLoader(
+            train_ds, batch_size=batch_size, sampler=sampler, **loader_kwargs
+        )
+    elif balance == "loss":
+        loss_class_weights = class_weights.to(device)
+        train_loader = DataLoader(
+            train_ds, batch_size=batch_size, shuffle=True, **loader_kwargs
+        )
+    else:  # "none"
+        train_loader = DataLoader(
+            train_ds, batch_size=batch_size, shuffle=True, **loader_kwargs
+        )
+    print(f"Balancing: {balance}  |  dropout={dropout}  weight_decay={weight_decay}")
+
     val_loader = (
         DataLoader(val_ds, batch_size=batch_size, **loader_kwargs) if val_ds else None
     )
 
     # Model, loss, optimizer, scheduler
-    model = PhrasePredictor().to(device)
+    model = PhrasePredictor(dropout=dropout).to(device)
     augment = SpecAugment().to(device)
-    criterion = PhraseLoss(class_weights=class_weights.to(device))
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    criterion = PhraseLoss(class_weights=loss_class_weights)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=lr_factor, patience=lr_patience
     )

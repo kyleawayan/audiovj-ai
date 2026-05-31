@@ -71,6 +71,7 @@ class PhrasePredictor(nn.Module):
         lstm_hidden: int = LSTM_HIDDEN,
         lstm_layers: int = LSTM_LAYERS,
         num_phrases: int = NUM_PHRASES,
+        dropout: float = 0.0,
     ) -> None:
         super().__init__()
         self.encoder = SpectrogramEncoder(n_mels, fixed_frames, encoder_channels)
@@ -80,7 +81,11 @@ class PhrasePredictor(nn.Module):
             hidden_size=lstm_hidden,
             num_layers=lstm_layers,
             batch_first=True,
+            dropout=dropout if lstm_layers > 1 else 0.0,
         )
+
+        # Regularize the shared representation before the heads.
+        self.head_dropout = nn.Dropout(dropout)
 
         # Forward prediction head
         self.next_phrase_head = nn.Linear(lstm_hidden, num_phrases)
@@ -94,6 +99,7 @@ class PhrasePredictor(nn.Module):
         encoded = self.encoder(x)  # [batch, seq_len, channels]
         lstm_out, _ = self.lstm(encoded)  # [batch, seq_len, hidden]
         last_hidden = lstm_out[:, -1, :]  # [batch, hidden]
+        last_hidden = self.head_dropout(last_hidden)
 
         return ModelOutput(
             next_phrase_logits=self.next_phrase_head(last_hidden),

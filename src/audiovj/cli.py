@@ -193,6 +193,11 @@ def train(
     num_workers: int = typer.Option(4, help="DataLoader worker processes (RAM-bound)"),
     prefetch_factor: int = typer.Option(4, help="Batches prefetched per worker"),
     log_interval: int = typer.Option(200, help="Log in-epoch progress every N batches"),
+    balance: str = typer.Option(
+        "sampler", help="Class balancing (pick ONE): sampler | loss | none"
+    ),
+    dropout: float = typer.Option(0.3, help="Dropout (LSTM inter-layer + pre-head)"),
+    weight_decay: float = typer.Option(1e-4, help="Adam weight decay (L2 regularization)"),
 ) -> None:
     """Train the phrase predictor model."""
     from audiovj.training import train_model
@@ -209,6 +214,9 @@ def train(
         num_workers=num_workers,
         prefetch_factor=prefetch_factor,
         log_interval=log_interval,
+        balance=balance,
+        dropout=dropout,
+        weight_decay=weight_decay,
     )
 
 
