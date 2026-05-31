@@ -1,0 +1,6 @@
+{
+  "permissions": {
+    "defaultMode": "auto",
+    "deny": ["Read(~/.claude/.credentials.json)"]
+  }
+}

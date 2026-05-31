@@ -1,0 +1,36 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored.
+
+# --- required ---
+project_id  = "your-new-isolated-project-id"
+bucket_name = "your-globally-unique-bucket-name" # GCS bucket names are global
+iap_user    = "you@example.com"                  # your Google account email
+
+# --- machine / GPU (defaults are tuned for this data-pipeline-bound workload) ---
+# machine_type    = "n1-highmem-8"
+# gpu_type        = "nvidia-tesla-t4"
+# gpu_count       = 1
+# local_ssd_count = 1
+# use_spot        = false   # set true for ~3x cheaper, interruptible
+
+# --- region/zone (keep US for WebSearch) ---
+# region = "us-central1"
+# zone   = "us-central1-a"
+
+# --- transfer object names in the bucket ---
+# archive_object     = "archive.tar"
+# repo_bundle_object = "repo.bundle"
+
+# --- guardrails ---
+# idle_shutdown_minutes = 60        # 0 disables
+
+# Budget alerts (needs billing-account permission for your Terraform identity):
+# enable_budget   = true
+# billing_account = "0X0X0X-0X0X0X-0X0X0X"
+# budget_amount   = 100
+
+# --- hardened egress (optional; only if you don't run Claude Code sandbox) ---
+# harden_egress      = true
+# egress_allow_cidrs = []   # add Anthropic API / PyPI CIDRs you've verified
+
+# --- danger: lets `terraform destroy` delete a non-empty bucket ---
+# bucket_force_destroy = false

@@ -1,0 +1,8 @@
+# Terraform state + local config (never commit these)
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+terraform.tfvars
+*.auto.tfvars
+crash.log
