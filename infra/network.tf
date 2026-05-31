@@ -54,21 +54,16 @@ resource "google_compute_firewall" "deny_all_ingress" {
 # Outbound internet for a VM with no external IP — via Cloud NAT.
 # Needed for: Anthropic API (Claude Code + WebSearch), PyPI (CUDA torch), apt.
 # Google APIs (GCS) go via Private Google Access and don't traverse NAT.
-#
-# Only created when the VM has no external IP. A VM WITH a public IP egresses
-# through that IP and never uses Cloud NAT, so we skip it to avoid an idle cost.
 ###############################################################################
 resource "google_compute_router" "router" {
-  count   = var.assign_external_ip ? 0 : 1
   name    = "audiovj-router"
   region  = var.region
   network = google_compute_network.vpc.id
 }
 
 resource "google_compute_router_nat" "nat" {
-  count                              = var.assign_external_ip ? 0 : 1
   name                               = "audiovj-nat"
-  router                             = google_compute_router.router[0].name
+  router                             = google_compute_router.router.name
   region                             = var.region
   nat_ip_allocate_option             = "AUTO_ONLY"
   source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
