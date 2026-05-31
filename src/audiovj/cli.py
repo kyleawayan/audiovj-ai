@@ -187,6 +187,9 @@ def train(
     lr_patience: int = typer.Option(5, help="ReduceLROnPlateau patience (epochs)"),
     lr_factor: float = typer.Option(0.5, help="ReduceLROnPlateau decay factor"),
     class_weight_cap: float = typer.Option(5.0, help="Cap on inverse-freq class weights"),
+    weight_power: float = typer.Option(
+        1.0, help="Class-weight exponent: 1=inverse-freq, 0.5=sqrt (gentler on majority), 0=uniform"
+    ),
     f1_save_threshold: float = typer.Option(
         0.0, help="Minimum macro-F1 before checkpoint saves (0 = always keep best)"
     ),
@@ -210,6 +213,7 @@ def train(
         lr_patience=lr_patience,
         lr_factor=lr_factor,
         class_weight_cap=class_weight_cap,
+        weight_power=weight_power,
         f1_save_threshold=f1_save_threshold,
         num_workers=num_workers,
         prefetch_factor=prefetch_factor,

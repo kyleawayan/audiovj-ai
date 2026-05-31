@@ -140,20 +140,23 @@ def _get_device() -> torch.device:
 
 
 def _compute_class_weights(
-    labels: list[int], num_classes: int, cap: float
+    labels: list[int], num_classes: int, cap: float, power: float = 1.0
 ) -> torch.Tensor:
-    """Inverse-frequency class weights, normalized so mean is ~1.0, capped at `cap`.
+    """Frequency-based class weights, capped at `cap`.
 
-    Classes absent from `labels` get weight = cap.
+    power=1.0 -> full inverse-frequency (w_c = N/(K*n_c)); power=0.5 -> sqrt
+    scheme, which lifts minorities without crushing the majority; power=0 ->
+    uniform. Classes absent from `labels` get weight = cap.
     """
     counts = torch.zeros(num_classes)
     for c in labels:
         counts[c] += 1
     total = counts.sum().item()
-    # Inverse freq: w_c = N / (K * n_c). Avoid div-by-zero.
-    weights = total / (counts.clamp(min=1.0) * num_classes)
-    # Classes with zero examples get cap (penalize the model heavily, even though
-    # gradient won't flow if they're never in a batch).
+    # Inverse freq raised to `power`. Avoid div-by-zero.
+    inv = total / (counts.clamp(min=1.0) * num_classes)
+    weights = inv ** power
+    # Classes with zero examples get cap (penalize heavily, even though gradient
+    # won't flow if they're never in a batch).
     weights = torch.where(counts > 0, weights, torch.full_like(weights, cap))
     weights = weights.clamp(max=cap)
     return weights
@@ -186,6 +189,7 @@ def train_model(
     lr_patience: int = 5,
     lr_factor: float = 0.5,
     class_weight_cap: float = 5.0,
+    weight_power: float = 1.0,
     f1_save_threshold: float = 0.0,
     num_workers: int = 4,
     prefetch_factor: int = 4,
@@ -223,9 +227,9 @@ def train_model(
 
     # Class weights from training-set current_phrase distribution
     class_weights = _compute_class_weights(
-        train_ds._current_phrase, num_phrases, cap=class_weight_cap
+        train_ds._current_phrase, num_phrases, cap=class_weight_cap, power=weight_power
     )
-    print(f"Class weights (cap={class_weight_cap}):")
+    print(f"Class weights (cap={class_weight_cap}, power={weight_power}):")
     for i, p in enumerate(PHRASE_TYPES):
         count = sum(1 for c in train_ds._current_phrase if c == i)
         print(f"  {p:<10} count={count:>6}  weight={class_weights[i].item():.3f}")
