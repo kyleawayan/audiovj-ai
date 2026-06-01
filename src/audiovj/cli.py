@@ -242,20 +242,59 @@ def evaluate(
     typer.echo(f"Evaluation ({metrics['total_samples']} samples):")
     typer.echo(f"  Next phrase accuracy:    {metrics['next_phrase_accuracy']:.1f}%")
     typer.echo(f"  Current phrase accuracy: {metrics['current_phrase_accuracy']:.1f}%")
-    typer.echo(f"  Beats-until MAE:         {metrics['beats_until_mae']:.2f}")
+    typer.echo(f"  Beats-until MAE (all):   {metrics['beats_until_mae']:.2f}")
+    typer.echo(
+        f"  Beats-until MAE (trans): {metrics['beats_until_mae_transition']:.2f}"
+        f"  ({metrics['transition_samples']} transition samples)"
+    )
     typer.echo(f"  Flip-flop rate:          {metrics['flip_flop_rate']:.1f}%")
+    typer.echo(f"  Macro-F1 (load-bearing): {metrics['macro_f1_load_bearing']:.1f}%")
 
-    typer.echo("\nPer-class accuracy (current phrase):")
+    typer.echo("\nPer-class (current phrase)      acc    prec    rec     F1")
+    prec = metrics["per_class_precision"]
+    rec = metrics["per_class_recall"]
+    f1 = metrics["per_class_f1"]
     for phrase, acc in metrics["per_class_accuracy"].items():
-        typer.echo(f"  {phrase:<12} {acc:.1f}%")
+        typer.echo(
+            f"  {phrase:<12} {acc:6.1f}% {prec[phrase]:6.1f}% "
+            f"{rec[phrase]:6.1f}% {f1[phrase]:6.1f}%"
+        )
+
+
+@app.command()
+def evaluate_seq(
+    checkpoint: str = typer.Option(None, help="Seq checkpoint (default data/models/seq_unified.safetensors)"),
+    onset_threshold: float = typer.Option(0.30, help="LB onset threshold (locked operating point)"),
+    fold: int = typer.Option(None, help="Restrict to one Raveform fold (e.g. 7 for held-out certification)"),
+    limit: int = typer.Option(None, help="Cap number of tracks"),
+) -> None:
+    """Offline twin of run-live: stateful seq inference + onset cueing on labeled
+    tracks. Reports the locked operating point (LB transition recall etc.)."""
+    from audiovj.evaluate import evaluate_seq as _evaluate_seq
+
+    r = _evaluate_seq(checkpoint=checkpoint, onset_threshold=onset_threshold, fold=fold, limit=limit)
+    if "error" in r:
+        typer.echo(f"Error: {r['error']}")
+        raise typer.Exit(1)
+    typer.echo(f"Seq pipeline (onset@{onset_threshold}) on {r['n_tracks']} tracks"
+               + (f" (fold {r['fold']})" if r["fold"] is not None else "") + ":")
+    typer.echo(f"  LB transition recall : {r['lb_transition_recall']:.1f}%")
+    typer.echo(f"  fire precision       : {r['fire_precision']:.1f}%")
+    typer.echo(f"  matched latency      : {r['matched_latency_beats']:.1f} beats  (fires {r['fires']})")
+    typer.echo("  per-class recall     : "
+               + "  ".join(f"{k} {v:.0f}%" for k, v in r["per_class_recall"].items()))
+    typer.echo(f"  drop events          : {r['drop_start_events']} starts / {r['drop_end_events']} ends")
 
 
 @app.command()
 def evaluate_pipeline(
     checkpoint: str = typer.Option(None, help="Path to model checkpoint"),
-    correction_threshold: float = typer.Option(0.7, help="Min confidence for phrase correction"),
+    correction_threshold: float = typer.Option(0.5, help="Min confidence for phrase correction"),
     transition_beats: float = typer.Option(4.0, help="Beats-until threshold for transition"),
     anticipate_beats: float = typer.Option(8.0, help="Beats-until threshold for anticipation"),
+    latch_after: int = typer.Option(2, help="Consecutive agreements before latching a countdown"),
+    sticky_beats: float = typer.Option(32.0, help="Sticky-hold window after a transition (beats)"),
+    warmup_beats: float = typer.Option(16.0, help="Warmup window before SM decisions engage (beats)"),
     limit: int = typer.Option(
         None, help="Cap number of tracks (quick eval; default all). Each track re-decodes its WAV."
     ),
@@ -268,6 +307,9 @@ def evaluate_pipeline(
         correction_threshold=correction_threshold,
         transition_beats=transition_beats,
         anticipate_beats=anticipate_beats,
+        latch_after=latch_after,
+        sticky_beats=sticky_beats,
+        warmup_beats=warmup_beats,
         limit=limit,
     )
 
@@ -281,20 +323,37 @@ def evaluate_pipeline(
     agg_actual = 0
     agg_corrections = 0
     agg_downbeats = 0
+    agg_detected = 0.0
     agg_timing_errors: list[float] = []
+    agg_matched: list[tuple[float, int]] = []
+    agg_cd_n = 0
+    agg_cd_mae = 0.0
+    agg_cd_corr = 0.0
+    agg_cd_mono = 0.0
 
     for r in results:
         typer.echo(f"\n{r['name']}")
         typer.echo(f"  Raw model accuracy:    {r['raw_accuracy']:5.1f}%")
         typer.echo(f"  State Manager accuracy:{r['sm_accuracy']:5.1f}%")
         typer.echo(
-            f"  Transitions: {r['transitions_fired']} fired, "
-            f"{r['actual_transitions']} actual "
+            f"  Changes: {r['transitions_fired']} transitions + {r['corrections']} corrections, "
+            f"{r['actual_transitions']} actual boundaries "
             f"({r['transition_recall']:.0f}% recall, {r['transition_precision']:.0f}% precision)"
         )
-        typer.echo(f"  Corrections: {r['corrections']} ({r['correction_rate']:.2f}/downbeat)")
-        if r["transitions_fired"] > 0:
-            typer.echo(f"  Timing error: {r['mean_timing_error']:.1f} beats mean")
+        if r["detected_boundaries"] > 0:
+            typer.echo(
+                f"  Matched latency: {r['matched_latency']:.1f} beats "
+                f"(real cueing precision on {r['detected_boundaries']} detected boundaries)"
+            )
+        if r["transitions_fired"] > 0 or r["corrections"] > 0:
+            typer.echo(f"  Fire->boundary (inflated): {r['mean_timing_error']:.1f} beats mean")
+        if r["countdown_samples"] > 0:
+            typer.echo(
+                f"  Countdown: MAE {r['countdown_mae']:.1f} beats, "
+                f"corr {r['countdown_corr']:+.2f}, "
+                f"monotonicity {r['countdown_monotonicity'] * 100:.0f}% "
+                f"({r['countdown_samples']} samples)"
+            )
 
         agg_raw += r["raw_accuracy"] * r["labeled_downbeats"]
         agg_sm += r["sm_accuracy"] * r["labeled_downbeats"]
@@ -302,8 +361,17 @@ def evaluate_pipeline(
         agg_transitions += r["transitions_fired"]
         agg_actual += r["actual_transitions"]
         agg_corrections += r["corrections"]
-        if r["transitions_fired"] > 0:
+        agg_detected += r["transition_recall"] / 100 * r["actual_transitions"]
+        if r["transitions_fired"] > 0 or r["corrections"] > 0:
             agg_timing_errors.append(r["mean_timing_error"])
+        if r["detected_boundaries"] > 0:
+            agg_matched.append((r["matched_latency"], r["detected_boundaries"]))
+        if r["countdown_samples"] > 0:
+            n = r["countdown_samples"]
+            agg_cd_n += n
+            agg_cd_mae += r["countdown_mae"] * n
+            agg_cd_corr += r["countdown_corr"] * n
+            agg_cd_mono += r["countdown_monotonicity"] * n
 
     typer.echo(f"\n{'─' * 50}")
     typer.echo(f"Aggregate ({len(results)} tracks, {agg_downbeats} downbeats):")
@@ -311,10 +379,25 @@ def evaluate_pipeline(
         f"  Raw accuracy: {agg_raw / max(agg_downbeats, 1):.1f}%  →  "
         f"SM accuracy: {agg_sm / max(agg_downbeats, 1):.1f}%"
     )
-    typer.echo(f"  Transitions: {agg_transitions} fired, {agg_actual} actual")
+    typer.echo(
+        f"  Changes: {agg_transitions} transitions + {agg_corrections} corrections, "
+        f"{agg_actual} actual boundaries "
+        f"({agg_detected / max(agg_actual, 1) * 100:.0f}% recall)"
+    )
     typer.echo(f"  Correction rate: {agg_corrections / max(agg_downbeats, 1):.2f}/downbeat")
+    if agg_matched:
+        wn = sum(n for _, n in agg_matched)
+        ml = sum(v * n for v, n in agg_matched) / max(wn, 1)
+        typer.echo(f"  Matched latency: {ml:.1f} beats (real cueing precision, {wn} detected boundaries)")
     if agg_timing_errors:
-        typer.echo(f"  Mean timing error: {sum(agg_timing_errors) / len(agg_timing_errors):.1f} beats")
+        typer.echo(f"  Fire->boundary (inflated by mid-phrase fires): {sum(agg_timing_errors) / len(agg_timing_errors):.1f} beats")
+    if agg_cd_n > 0:
+        typer.echo(
+            f"  Countdown quality: MAE {agg_cd_mae / agg_cd_n:.1f} beats, "
+            f"corr {agg_cd_corr / agg_cd_n:+.2f}, "
+            f"monotonicity {agg_cd_mono / agg_cd_n * 100:.0f}% "
+            f"({agg_cd_n} samples)"
+        )
 
 
 @app.command(name="validate-on-old-binary-drop-detection-see-experiment-binary-drop-detection-branch")
@@ -328,9 +411,12 @@ def predict_folder(
     folder: Path = typer.Argument(help="Folder of audio files (recursive)"),
     out_dir: Path = typer.Option(Path("data/predictions"), help="Where to write per-track JSON"),
     checkpoint: Path = typer.Option(None, help="Path to model checkpoint"),
-    correction_threshold: float = typer.Option(0.7, help="Min confidence for SM phrase correction"),
+    correction_threshold: float = typer.Option(0.5, help="Min confidence for SM phrase correction"),
     transition_beats: float = typer.Option(4.0, help="SM transition beats threshold"),
     anticipate_beats: float = typer.Option(8.0, help="SM anticipation beats threshold"),
+    latch_after: int = typer.Option(2, help="Consecutive agreements before latching a countdown"),
+    sticky_beats: float = typer.Option(32.0, help="Sticky-hold window after a transition (beats)"),
+    warmup_beats: float = typer.Option(16.0, help="Warmup window before SM decisions engage (beats)"),
     force: bool = typer.Option(False, help="Re-predict files that already have output"),
 ) -> None:
     """Run model + State Manager on every audio file in a folder; dump predictions to JSON."""
@@ -347,6 +433,9 @@ def predict_folder(
         correction_threshold=correction_threshold,
         transition_beats=transition_beats,
         anticipate_beats=anticipate_beats,
+        latch_after=latch_after,
+        sticky_beats=sticky_beats,
+        warmup_beats=warmup_beats,
         skip_existing=not force,
     )
     typer.echo(f"\nDone: {processed} processed, {skipped} skipped, {failed} failed")
@@ -479,14 +568,22 @@ def run_live(
     carabiner_port: int = typer.Option(17000, help="Carabiner port"),
     osc_host: str = typer.Option("127.0.0.1", help="OSC destination host"),
     osc_port: int = typer.Option(9000, help="OSC destination port"),
-    correction_threshold: float = typer.Option(0.7, help="Min confidence for phrase correction"),
+    correction_threshold: float = typer.Option(0.5, help="Min confidence for phrase correction"),
     transition_beats: float = typer.Option(4.0, help="Beats-until threshold for transition"),
     anticipate_beats: float = typer.Option(8.0, help="Beats-until threshold for anticipation cue"),
+    latch_after: int = typer.Option(2, help="Consecutive agreements before latching a countdown"),
+    sticky_beats: float = typer.Option(32.0, help="Sticky-hold window after a transition (beats)"),
+    warmup_beats: float = typer.Option(16.0, help="Warmup window before SM decisions engage (beats)"),
+    onset_threshold: float = typer.Option(
+        0.30, help="Load-bearing onset threshold for transition cueing (locked operating point)"
+    ),
 ) -> None:
     """Start real-time phrase detection from live audio."""
     from audiovj.live.pipeline import LivePipeline
 
-    ckpt = Path(checkpoint) if checkpoint else MODELS_DIR / "phrase_predictor.safetensors"
+    # Default to the production seq model (UnifiedSeqPredictor); the old 8-beat
+    # phrase_predictor is not wired into the streaming path.
+    ckpt = Path(checkpoint) if checkpoint else MODELS_DIR / "seq_unified.safetensors"
     if not ckpt.exists():
         typer.echo(f"Error: Checkpoint not found: {ckpt}")
         raise typer.Exit(1)
@@ -520,5 +617,9 @@ def run_live(
         correction_threshold=correction_threshold,
         transition_beats=transition_beats,
         anticipate_beats=anticipate_beats,
+        latch_after=latch_after,
+        sticky_beats=sticky_beats,
+        warmup_beats=warmup_beats,
+        onset_threshold=onset_threshold,
     )
     pipeline.run()

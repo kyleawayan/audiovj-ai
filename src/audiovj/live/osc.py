@@ -31,6 +31,11 @@ class OSCEmitter:
                 addr, [event.phrase, event.beats_until or 0.0, event.confidence]
             )
 
+        elif event.kind in ("drop_start", "drop_end", "buildup"):
+            # Onset cue-tracker events (the locked operating point):
+            #   /audiovj/drop_start, /audiovj/drop_end, /audiovj/buildup
+            self._client.send_message(addr, [event.phrase, event.confidence])
+
     def send_beat(self, bpm: float) -> None:
         """Send a beat sync message (every downbeat)."""
         self._client.send_message(f"{self._prefix}/beat", [bpm])

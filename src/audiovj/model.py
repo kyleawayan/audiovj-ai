@@ -106,3 +106,90 @@ class PhrasePredictor(nn.Module):
             current_phrase_logits=self.current_phrase_head(last_hidden),
             beats_until=self.beats_until_head(last_hidden),
         )
+
+
+class UnifiedSeqPredictor(nn.Module):
+    """Longer-context sequence model: per-downbeat CNN window encoder ->
+    *causal* LSTM ACROSS downbeats -> 3 heads (current/next phrase + a dedicated
+    beats-until branch).
+
+    This is the production model (KA-233/234 full-scale winner; macro-F1 ~0.65 vs
+    the 8-beat PhrasePredictor's ~0.46). Its advantage is the cross-downbeat LSTM
+    that accumulates context, so it MUST be run statefully when streaming live:
+    feed one downbeat window at a time and carry the LSTM hidden state forward
+    (see ``step``). Because the context LSTM is unidirectional/causal, stepping
+    one downbeat at a time produces outputs identical to a full-sequence
+    ``forward`` — so the offline-certified numbers transfer to live exactly.
+
+    Submodule names match experiments/_unified.py so the trained checkpoint
+    (seq_unified_full_v2.safetensors) loads directly.
+    """
+
+    def __init__(
+        self,
+        n_mels: int = N_MELS,
+        fixed_frames: int = FIXED_FRAMES,
+        encoder_channels: list[int] = ENCODER_CHANNELS,
+        lstm_hidden: int = LSTM_HIDDEN,
+        lstm_layers: int = LSTM_LAYERS,
+        num_phrases: int = NUM_PHRASES,
+        dropout: float = 0.0,
+        detach: bool = False,
+    ) -> None:
+        super().__init__()
+        self.encoder = SpectrogramEncoder(n_mels, fixed_frames, encoder_channels)
+        ch = self.encoder.out_channels
+        self.ctx_lstm = nn.LSTM(
+            ch, lstm_hidden, lstm_layers, batch_first=True,
+            dropout=dropout if lstm_layers > 1 else 0.0,
+        )
+        self.head_dropout = nn.Dropout(dropout)
+        self.next_phrase_head = nn.Linear(lstm_hidden, num_phrases)
+        self.current_phrase_head = nn.Linear(lstm_hidden, num_phrases)
+        self.beats_branch = nn.Sequential(
+            nn.Linear(lstm_hidden, lstm_hidden), nn.ReLU(),
+            nn.Dropout(dropout), nn.Linear(lstm_hidden, 1),
+        )
+        self.detach = detach
+
+    def _encode_windows(self, x: torch.Tensor) -> torch.Tensor:
+        """[B, T, n_mels, frames] -> per-downbeat embeddings [B, T, ch]."""
+        b, t = x.shape[0], x.shape[1]
+        enc = self.encoder(x.reshape(b * t, x.shape[2], x.shape[3]))  # [B*T, seq, ch]
+        return enc.mean(dim=1).reshape(b, t, -1)  # [B, T, ch]
+
+    def forward(self, x: torch.Tensor) -> ModelOutput:
+        """Whole-sequence forward. Input: [B, T, n_mels, frames]."""
+        win = self._encode_windows(x)
+        ctx, _ = self.ctx_lstm(win)
+        h = self.head_dropout(ctx)
+        beats_in = h.detach() if self.detach else h
+        return ModelOutput(
+            next_phrase_logits=self.next_phrase_head(h),
+            current_phrase_logits=self.current_phrase_head(h),
+            beats_until=self.beats_branch(beats_in),
+        )
+
+    def step(
+        self, window: torch.Tensor, state: tuple | None = None
+    ) -> tuple[ModelOutput, tuple]:
+        """Stateful single-downbeat step for live streaming.
+
+        ``window``: one downbeat's mel window [n_mels, frames] (or [1, n_mels,
+        frames]). ``state``: carried (h, c) from the previous downbeat, or None
+        to start a fresh track. Returns (ModelOutput with [1, num_phrases]
+        logits, new_state). Carry ``new_state`` into the next call. Equivalent to
+        ``forward`` over the sequence so far (causal LSTM).
+        """
+        if window.dim() == 2:
+            window = window.unsqueeze(0)  # [1, n_mels, frames]
+        enc = self.encoder(window)            # [1, seq, ch]
+        win = enc.mean(dim=1).unsqueeze(1)    # [1, 1, ch]
+        ctx, new_state = self.ctx_lstm(win, state)  # [1, 1, hidden]
+        h = self.head_dropout(ctx[:, -1, :])  # [1, hidden]
+        out = ModelOutput(
+            next_phrase_logits=self.next_phrase_head(h),
+            current_phrase_logits=self.current_phrase_head(h),
+            beats_until=self.beats_branch(h),
+        )
+        return out, new_state

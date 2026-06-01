@@ -13,7 +13,8 @@ import torch
 from audiovj.config import CONTEXT_BEATS, SAMPLE_RATE
 from audiovj.live.audio import AudioCapture
 from audiovj.live.carabiner import CarabinerClient, DownbeatEvent
-from audiovj.live.inference import InferenceEngine
+from audiovj.live.cue import OnsetCueTracker
+from audiovj.live.inference import SeqInferenceEngine
 from audiovj.live.osc import OSCEmitter
 from audiovj.live.state import PhraseStateManager
 
@@ -73,9 +74,13 @@ class LivePipeline:
         carabiner_port: int = 17000,
         osc_host: str = "127.0.0.1",
         osc_port: int = 9000,
-        correction_threshold: float = 0.7,
+        correction_threshold: float = 0.5,
         transition_beats: float = 4.0,
         anticipate_beats: float = 8.0,
+        latch_after: int = 2,
+        sticky_beats: float = 32.0,
+        warmup_beats: float = 16.0,
+        onset_threshold: float = 0.30,
     ) -> None:
         if torch.cuda.is_available():
             device = torch.device("cuda")
@@ -84,16 +89,26 @@ class LivePipeline:
         else:
             device = torch.device("cpu")
         print(f"Loading model from {checkpoint_path} on {device}...")
-        self._engine = InferenceEngine(checkpoint_path, device)
+        # Stateful streaming seq model: carries cross-downbeat LSTM context.
+        self._engine = SeqInferenceEngine(checkpoint_path, device)
+        self._engine.reset()
 
         self._audio = AudioCapture(
             device=audio_device, channels=audio_channels, sample_rate=SAMPLE_RATE
         )
         self._osc = OSCEmitter(osc_host, osc_port)
+        # Onset cueing = the locked operating point for transitions / drop state.
+        self._cue = OnsetCueTracker(onset_threshold=onset_threshold)
+        # State Manager kept ONLY for its (good) mechanical countdown / drop-incoming
+        # anticipation; its consensus-transition core spams for this model so we do
+        # not emit its transition/correction events.
         self._state = PhraseStateManager(
             correction_threshold=correction_threshold,
             transition_beats=transition_beats,
             anticipate_beats=anticipate_beats,
+            latch_after=latch_after,
+            sticky_beats=sticky_beats,
+            warmup_beats=warmup_beats,
         )
 
         self._downbeat_queue: queue.Queue[DownbeatEvent] = queue.Queue()
@@ -107,6 +122,7 @@ class LivePipeline:
         self._display_next = ""
         self._countdown_at_downbeat: float | None = None
         self._countdown_phrase_display: str = ""
+        self._sm_debug: str = ""
 
     def _draw_status(self) -> None:
         """Draw the status bar on the reserved bottom 2 lines."""
@@ -126,6 +142,8 @@ class LivePipeline:
                 phrase_info += f"   Next: {self._countdown_phrase_display} in {interpolated:.0f} beats"
             elif self._display_next:
                 phrase_info += f"   Next: {self._display_next}"
+        if self._sm_debug:
+            phrase_info += f"   [SM {self._sm_debug}]"
 
         if len(channel_peaks) == 2:
             line1 = f"  L {_meter_bar(channel_peaks[0])}  {beats}  {bpm:6.1f} BPM"
@@ -177,10 +195,18 @@ class LivePipeline:
                 audio_window = self._audio.read_last_n_samples(samples_needed)
 
                 prediction = self._engine.predict(audio_window, evt.bpm)
-                events = self._state.update(prediction)
+                # Onset cueing owns transitions / drop_start / drop_end / buildup.
+                cue_events = self._cue.update(prediction)
+                # SM owns only the countdown / drop-incoming anticipation here.
+                sm_events = self._state.update(prediction)
 
-                for event in events:
+                events = list(cue_events)
+                for event in cue_events:
                     self._osc.send_event(event)
+                for event in sm_events:
+                    if event.kind in ("anticipate", "phrase"):
+                        self._osc.send_event(event)
+                        events.append(event)
                 self._osc.send_beat(evt.bpm)
 
                 # Update status bar phrase info
@@ -194,14 +220,19 @@ class LivePipeline:
                     self._countdown_phrase_display = ""
                     self._countdown_at_downbeat = None
                     self._display_next = ""
+                self._sm_debug = self._state.debug_str
 
                 # Console output
                 state_indicator = ""
                 for event in events:
-                    if event.kind == "transition":
-                        state_indicator = f"  >>> TRANSITION to {event.phrase}"
-                    elif event.kind == "correction":
-                        state_indicator = f"  !!! CORRECTION to {event.phrase}"
+                    if event.kind == "drop_start":
+                        state_indicator = "  >>> DROP START"
+                    elif event.kind == "drop_end":
+                        state_indicator = "  <<< DROP END"
+                    elif event.kind == "buildup":
+                        state_indicator = "  ^^^ BUILDUP"
+                    elif event.kind == "transition":
+                        state_indicator = f"  >>> {event.phrase.upper()}"
                     elif event.kind == "anticipate":
                         state_indicator = f"  ... {event.phrase} in ~{event.beats_until:.0f} beats"
 

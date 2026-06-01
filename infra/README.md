@@ -7,9 +7,13 @@ AudioVJ phrase-detection model, plus a private GCS bucket to move data and code 
 
 - **New-project isolation** — only `compute`, `storage`, `iap`, `iam` APIs are enabled; every
   other GCP API stays off.
-- **GPU VM** `n1-highmem-8` + **1× T4** + **375GB local NVMe SSD**. The workload is
-  data-pipeline-bound (tiny model, ~47GB of mmap'd features read every epoch), so the RAM and
-  fast local disk matter more than the GPU. Flip to L4/spot/etc. via variables.
+- **GPU VM** + **375GB local NVMe SSD**. The workload is data-pipeline-bound — ~47GB of
+  features read every epoch — so the fast local disk matters most. The Terraform *default* is
+  `n1-highmem-8` + 1× T4 (cheap; fine for the original 8-beat model). The longer-context
+  **sequence model is stateful** and is run on **`g2-standard-8` + 1× L4** (set
+  `machine_type` / `gpu_type`); its **32GB RAM is smaller than the feature set**, so training
+  **streams each track's windows from the local SSD per epoch** rather than holding them in
+  page cache. Flip machine / GPU / spot via variables.
 - **Private GCS bucket** (uniform access, versioning, public access blocked).
 - **`runner-sa`** — the VM's identity, with **zero project roles**; its only access is
   `objectAdmin` on the one bucket, and instance OAuth scopes are capped to storage + logging.
@@ -96,7 +100,8 @@ cp ./out/models-<ts>/*.safetensors data/models/          # for local inference
 
 ## Cost & teardown
 
-≈ **$0.87/hr** on-demand (`n1-highmem-8` + T4 + local SSD) → ~115 hrs in $100. The bucket
+≈ **$0.87/hr** on-demand for the default `n1-highmem-8` + T4 + local SSD (~115 hrs in $100);
+the `g2-standard-8` + L4 used for the sequence model is **≈ $0.90/hr** (similar). The bucket
 persists at ~$5/mo. To stop spend:
 
 - `idle_shutdown_minutes` stops the VM automatically when idle (local SSD scratch is wiped;

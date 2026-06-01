@@ -62,9 +62,12 @@ def predict_folder(
     folder: Path,
     out_dir: Path,
     checkpoint: Path | None = None,
-    correction_threshold: float = 0.7,
+    correction_threshold: float = 0.5,
     transition_beats: float = 4.0,
     anticipate_beats: float = 8.0,
+    latch_after: int = 2,
+    sticky_beats: float = 32.0,
+    warmup_beats: float = 16.0,
     skip_existing: bool = True,
 ) -> tuple[int, int, int]:
     """Run predictions on every audio file under `folder`.
@@ -123,6 +126,9 @@ def predict_folder(
             correction_threshold=correction_threshold,
             transition_beats=transition_beats,
             anticipate_beats=anticipate_beats,
+            latch_after=latch_after,
+            sticky_beats=sticky_beats,
+            warmup_beats=warmup_beats,
         )
 
         predictions: list[dict] = []
