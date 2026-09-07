@@ -577,6 +577,24 @@ def run_live(
     onset_threshold: float = typer.Option(
         0.30, help="Load-bearing onset threshold for transition cueing (locked operating point)"
     ),
+    auto_gain: bool = typer.Option(
+        True, "--auto-gain/--no-auto-gain",
+        help="Auto-normalize the feed to training level (tracks loud sections, self-corrects mid-set volume changes)."
+    ),
+    input_gain_db: float = typer.Option(
+        0.0, help="Fixed manual gain (dB) trim on top of auto-gain. Use with --no-auto-gain for a fixed level."
+    ),
+    ma3_host: str = typer.Option(
+        None, help="grandMA3 console IP. Set this to drive executors 201-208 from the phrase."
+    ),
+    ma3_port: int = typer.Option(8000, help="grandMA3 OSC input port"),
+    ma3_prefix: str = typer.Option("gma3", help="grandMA3 OSC prefix (Menu>In&Out>OSC)"),
+    ma3_on_value: float = typer.Option(
+        1.0, help="Fader value for the active phrase (1 if MA3 range 0..1, 100 if 0..100)"
+    ),
+    ma3_speedmaster: str = typer.Option(
+        "3.1", help="SpeedMaster to sync BPM to (e.g. 3.1). Empty to disable BPM sync."
+    ),
 ) -> None:
     """Start real-time phrase detection from live audio."""
     from audiovj.live.pipeline import LivePipeline
@@ -621,5 +639,12 @@ def run_live(
         sticky_beats=sticky_beats,
         warmup_beats=warmup_beats,
         onset_threshold=onset_threshold,
+        input_gain_db=input_gain_db,
+        auto_gain=auto_gain,
+        ma3_host=ma3_host,
+        ma3_port=ma3_port,
+        ma3_prefix=ma3_prefix,
+        ma3_on_value=ma3_on_value,
+        ma3_speedmaster=ma3_speedmaster,
     )
     pipeline.run()

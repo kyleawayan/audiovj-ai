@@ -8,6 +8,7 @@ import threading
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 
 from audiovj.config import CONTEXT_BEATS, SAMPLE_RATE
@@ -81,6 +82,13 @@ class LivePipeline:
         sticky_beats: float = 32.0,
         warmup_beats: float = 16.0,
         onset_threshold: float = 0.30,
+        input_gain_db: float = 0.0,
+        auto_gain: bool = True,
+        ma3_host: str | None = None,
+        ma3_port: int = 8000,
+        ma3_prefix: str = "gma3",
+        ma3_on_value: float = 1.0,
+        ma3_speedmaster: str = "3.1",
     ) -> None:
         if torch.cuda.is_available():
             device = torch.device("cuda")
@@ -92,11 +100,36 @@ class LivePipeline:
         # Stateful streaming seq model: carries cross-downbeat LSTM context.
         self._engine = SeqInferenceEngine(checkpoint_path, device)
         self._engine.reset()
+        # Level matching: training audio is full-scale WAV; a line/loopback feed is
+        # often much quieter, and mel is absolute dB, so a quiet feed collapses
+        # predictions to the quiet classes (intro/altintro). Two stages:
+        #  - auto_gain: a slow peak-follower AGC that tracks the loud (drop) level
+        #    over ~tens of seconds and normalizes it toward full scale, so a
+        #    mid-set volume/limiter change self-corrects. Slow enough to preserve
+        #    within-track dynamics (a drop stays louder than a breakdown).
+        #  - input_gain: a fixed manual trim applied on top (dB).
+        self._input_gain = 10.0 ** (input_gain_db / 20.0)
+        self._auto_gain = auto_gain
+        self._agc_level = 0.0        # slow peak follower (linear, 0..1)
+        self._agc_target = 0.9       # aim the loud level near full scale
+        self._agc_release = 0.95     # per-downbeat decay (~40s memory at ~2s/db)
+        self._agc_max = 60.0         # cap boost at ~35 dB (avoid amplifying silence)
+        self._agc_floor = 0.003      # below this peak = silence, hold gain at 1
+        self._agc_gain = 1.0         # last applied auto gain (for the status bar)
 
         self._audio = AudioCapture(
             device=audio_device, channels=audio_channels, sample_rate=SAMPLE_RATE
         )
         self._osc = OSCEmitter(osc_host, osc_port)
+        # Optional grandMA3 bridge: current phrase -> executor 201-208 (one lit).
+        self._ma3 = None
+        if ma3_host:
+            from audiovj.live.grandma3 import GrandMA3PhraseBridge
+            self._ma3 = GrandMA3PhraseBridge(
+                ma3_host, ma3_port, ma3_prefix, ma3_on_value, ma3_speedmaster
+            )
+            bpm_note = f", BPM->Master {ma3_speedmaster}" if ma3_speedmaster else ""
+            print(f"grandMA3 -> {ma3_host}:{ma3_port} /{ma3_prefix}/Fader20x{bpm_note}")
         # Onset cueing = the locked operating point for transitions / drop state.
         self._cue = OnsetCueTracker(onset_threshold=onset_threshold)
         # State Manager kept ONLY for its (good) mechanical countdown / drop-incoming
@@ -193,6 +226,17 @@ class LivePipeline:
                 beat_duration = 60.0 / evt.bpm
                 samples_needed = int(CONTEXT_BEATS * beat_duration * SAMPLE_RATE)
                 audio_window = self._audio.read_last_n_samples(samples_needed)
+                if self._auto_gain:
+                    peak = float(np.abs(audio_window).max())
+                    # instant attack, slow release -> follows the loud level
+                    self._agc_level = max(peak, self._agc_level * self._agc_release)
+                    if self._agc_level > self._agc_floor:
+                        self._agc_gain = min(self._agc_target / self._agc_level, self._agc_max)
+                    else:
+                        self._agc_gain = 1.0
+                    audio_window = audio_window * self._agc_gain
+                if self._input_gain != 1.0:
+                    audio_window = audio_window * self._input_gain
 
                 prediction = self._engine.predict(audio_window, evt.bpm)
                 # Onset cueing owns transitions / drop_start / drop_end / buildup.
@@ -208,6 +252,11 @@ class LivePipeline:
                         self._osc.send_event(event)
                         events.append(event)
                 self._osc.send_beat(evt.bpm)
+
+                # grandMA3: light the executor for the current phrase + sync BPM.
+                if self._ma3 is not None:
+                    self._ma3.set_phrase(prediction.current_phrase)
+                    self._ma3.set_bpm(evt.bpm)
 
                 # Update status bar phrase info
                 self._display_phrase = self._state.running_phrase
@@ -240,7 +289,8 @@ class LivePipeline:
                     f"[{self._state.running_phrase:<12}] "
                     f"current={prediction.current_phrase:<12} ({prediction.current_confidence:.0%})  "
                     f"next={prediction.next_phrase:<12} ({prediction.next_confidence:.0%})  "
-                    f"beats_until={prediction.beats_until:.0f}"
+                    f"beats_until={prediction.beats_until:.0f}  "
+                    f"gain={20.0 * math.log10(max(self._agc_gain, 1e-9)):+.0f}dB"
                     f"{state_indicator}"
                 )
 
@@ -248,6 +298,8 @@ class LivePipeline:
             pass
         finally:
             self._status_running = False
+            if self._ma3 is not None:
+                self._ma3.all_off()
             self._osc.send_status("stopped")
             self._carabiner.stop()
             self._audio.stop()
