@@ -23,6 +23,9 @@ class DownbeatEvent:
     time: float  # wall-clock time.monotonic() when detected
     bpm: float
     beat_number: float
+    # True when this downbeat did not land ~one bar after the previous one —
+    # i.e. the Link timeline jumped. The window for it is off-grid.
+    irregular: bool = False
 
 
 class CarabinerClient:
@@ -47,10 +50,27 @@ class CarabinerClient:
         self._bpm = 120.0
         self._beat_phase = 0.0  # 0.0-3.99, current position within 4-beat bar
         self._recv_buffer = b""
+        self._peers = 0
+        self._last_downbeat_t: float | None = None
+        self._alive = True
 
     @property
     def bpm(self) -> float:
         return self._bpm
+
+    @property
+    def peers(self) -> int:
+        """Ableton Link peers Carabiner can see. 0 means nothing is sharing a
+        timeline with us — the beat grid is Carabiner's own free-running clock,
+        not the DJ software's."""
+        return self._peers
+
+    @property
+    def alive(self) -> bool:
+        """False once the polling thread has lost the connection. The pipeline
+        blocks forever on the downbeat queue, so a silent death here presents as
+        infinite lateness rather than an error."""
+        return self._alive
 
     @property
     def beat_phase(self) -> float:
@@ -91,7 +111,16 @@ class CarabinerClient:
                 msgs = self._read_messages()
                 for msg in msgs:
                     self._parse_status(msg)
-                print(f"Connected to Carabiner at {self._host}:{self._port} (BPM: {self._bpm:.1f})")
+                print(
+                    f"Connected to Carabiner at {self._host}:{self._port} "
+                    f"(BPM: {self._bpm:.1f}, Link peers: {self._peers})"
+                )
+                if self._peers == 0:
+                    print(
+                        "  WARNING: 0 Link peers — nothing is sharing a timeline. "
+                        "The beat grid is Carabiner's free-running clock, not the "
+                        "DJ software's, so downbeats will not match the music."
+                    )
                 return
             except (ConnectionRefusedError, OSError):
                 sock.close()
@@ -100,10 +129,18 @@ class CarabinerClient:
                     printed_waiting = True
                 time.sleep(2.0)
 
-    def _send(self, msg: str) -> None:
-        """Send a message to Carabiner."""
-        if self._sock is not None:
+    def _send(self, msg: str) -> bool:
+        """Send a message to Carabiner. Returns False if the link is gone."""
+        if self._sock is None:
+            return False
+        try:
             self._sock.sendall(msg.encode())
+            return True
+        except OSError as exc:
+            if self._alive:
+                print(f"\nCarabiner: connection lost ({exc}) — beat grid is stale.")
+            self._alive = False
+            return False
 
     def _read_messages(self) -> list[str]:
         """Read available data and return complete newline-delimited messages."""
@@ -139,6 +176,7 @@ class CarabinerClient:
         m = STATUS_RE.search(msg)
         if m is None:
             return None
+        self._peers = int(m.group(1))
         self._bpm = float(m.group(2))
         return float(m.group(4))
 
@@ -147,7 +185,9 @@ class CarabinerClient:
         prev_phase: float | None = None
 
         while self._running:
-            self._send("status\n")
+            if not self._send("status\n"):
+                time.sleep(1.0)
+                continue
             msgs = self._read_messages()
 
             for msg in msgs:
@@ -159,10 +199,23 @@ class CarabinerClient:
                 self._beat_phase = phase
 
                 if prev_phase is not None and prev_phase > 3.0 and phase < 1.0:
+                    now = time.monotonic()
+                    # djay re-anchors Link phase on deck handover, sync presses and
+                    # beatgrid nudges. A forward jump fires a spurious mid-bar
+                    # downbeat (window 2 beats off, out of distribution); a
+                    # backward jump swallows one (a 4-beat decision gap). Flag it
+                    # rather than silently feeding the model a bad window.
+                    expected = 4.0 * 60.0 / max(self._bpm, 1e-6)
+                    irregular = False
+                    if self._last_downbeat_t is not None:
+                        delta = now - self._last_downbeat_t
+                        irregular = abs(delta - expected) > 0.10 * expected
+                    self._last_downbeat_t = now
                     self._on_downbeat(DownbeatEvent(
-                        time=time.monotonic(),
+                        time=now,
                         bpm=self._bpm,
                         beat_number=beat,
+                        irregular=irregular,
                     ))
 
                 prev_phase = phase

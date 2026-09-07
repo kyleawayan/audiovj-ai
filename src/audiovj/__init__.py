@@ -35,8 +35,15 @@ def _ensure_bundled_cuda_libs() -> None:
     except ImportError:
         return  # CPU-only / non-CUDA platform (e.g. macOS): nothing to do
 
-    nvidia_root = os.path.dirname(nvidia.__file__)
-    libdirs = sorted(glob.glob(os.path.join(nvidia_root, "*", "lib")))
+    # A namespace package (no __init__.py) has __file__ == None, which is not an
+    # ImportError and so escapes the guard above. Use __path__ instead, which is
+    # populated for both regular and namespace packages.
+    roots = [r for r in getattr(nvidia, "__path__", []) if r]
+    if not roots and getattr(nvidia, "__file__", None):
+        roots = [os.path.dirname(nvidia.__file__)]
+    libdirs = sorted(
+        d for root in roots for d in glob.glob(os.path.join(root, "*", "lib"))
+    )
     if not libdirs:
         return
 

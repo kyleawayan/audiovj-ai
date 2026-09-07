@@ -487,7 +487,10 @@ def evaluate_seq(
         return {"error": f"checkpoint not found: {ckpt}"}
     engine = SeqInferenceEngine(Path(ckpt), device)
 
-    lb = ("intro", "buildup", "drop", "outro")
+    # Import the live tracker's own class list so evaluate-seq stays a true
+    # offline twin of run-live. Hardcoding it here silently decouples the two the
+    # moment the live cue set changes.
+    from audiovj.live.cue import _LB as lb
     lb_set = set(lb)
     tracks = [
         t for t in load_tracks(TRACKS_DIR)

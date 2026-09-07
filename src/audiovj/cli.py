@@ -599,8 +599,38 @@ def run_live(
         "DDJ-GRV6", help="MIDI input port (substring match) for the manual drop-arm pad. Empty to disable."
     ),
     midi_note: int = typer.Option(61, help="MIDI note number that arms a drop (channels 1-4)"),
+    midi_mark_note: int = typer.Option(
+        None,
+        help="MIDI note that MARKS a drop for the log without forcing it. Use a "
+             "different pad from --midi-note: a pad that forces 'drop' makes the "
+             "measured latency zero on exactly the bars you marked.",
+    ),
     force_drop_beats: int = typer.Option(
         32, help="How many beats a manually-armed drop is held before the model resumes"
+    ),
+    drop_confirm: int = typer.Option(
+        1, help="Downbeats of 'drop' before drop_start fires (1 = immediate; was 2, costing a bar)"
+    ),
+    drop_release: int = typer.Option(
+        2, help="Non-drop downbeats before drop_end fires. Keep above --drop-confirm to avoid mid-drop flapping."
+    ),
+    drop_light_threshold: float = typer.Option(
+        0.0,
+        help="Light the drop executor when p(drop) crosses this, instead of when "
+             "drop wins the 10-class argmax. 0 = off (previous behaviour). Try 0.30 "
+             "once you have seen what p(drop) actually does at the drop downbeat.",
+    ),
+    drop_light_hold: int = typer.Option(
+        2, help="Downbeats the thresholded drop light is held after p(drop) falls back below it"
+    ),
+    event_log: str = typer.Option(
+        None, help="Append a JSONL record per downbeat (probs, events, marks) to this path."
+    ),
+    reset_state_beats: int = typer.Option(
+        0,
+        help="Reset the LSTM context every N beats. 0 = never (current behaviour). "
+             "State is otherwise carried for the whole session, thousands of steps "
+             "beyond the ~150-200 the model was trained on.",
     ),
 ) -> None:
     """Start real-time phrase detection from live audio."""
@@ -655,6 +685,13 @@ def run_live(
         ma3_speedmaster=ma3_speedmaster,
         midi_port=midi_port,
         midi_note=midi_note,
+        midi_mark_note=midi_mark_note,
         force_drop_beats=force_drop_beats,
+        drop_confirm=drop_confirm,
+        drop_release=drop_release,
+        drop_light_threshold=drop_light_threshold,
+        drop_light_hold=drop_light_hold,
+        event_log=Path(event_log) if event_log else None,
+        reset_state_beats=reset_state_beats,
     )
     pipeline.run()

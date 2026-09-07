@@ -35,6 +35,29 @@ def load_audio(
     return waveform, duration
 
 
+# Building a MelSpectrogram constructs a 128x1025 filterbank. Doing that on every
+# call costs ~2.3ms — ~44% of feature extraction — which is invisible once per bar
+# but becomes the dominant term if we ever decide faster than that. Cache per
+# sample rate; the transforms are stateless w.r.t. the input.
+_MEL_CACHE: dict[int, tuple] = {}
+
+
+def _mel_transforms(sample_rate: int) -> tuple:
+    t = _MEL_CACHE.get(sample_rate)
+    if t is None:
+        t = (
+            torchaudio.transforms.MelSpectrogram(
+                sample_rate=sample_rate,
+                n_fft=N_FFT,
+                hop_length=HOP_LENGTH,
+                n_mels=N_MELS,
+            ),
+            torchaudio.transforms.AmplitudeToDB(),
+        )
+        _MEL_CACHE[sample_rate] = t
+    return t
+
+
 def extract_mel_spectrogram(
     waveform: torch.Tensor, sample_rate: int = SAMPLE_RATE
 ) -> torch.Tensor:
@@ -42,13 +65,7 @@ def extract_mel_spectrogram(
 
     Returns tensor of shape [1, n_mels, time_frames] (log-scale dB).
     """
-    mel_transform = torchaudio.transforms.MelSpectrogram(
-        sample_rate=sample_rate,
-        n_fft=N_FFT,
-        hop_length=HOP_LENGTH,
-        n_mels=N_MELS,
-    )
-    db_transform = torchaudio.transforms.AmplitudeToDB()
+    mel_transform, db_transform = _mel_transforms(sample_rate)
 
     mel_spec = mel_transform(waveform)
     mel_spec = db_transform(mel_spec)

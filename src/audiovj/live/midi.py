@@ -14,21 +14,25 @@ import mido
 
 
 class MidiNoteListener:
-    """Calls ``on_note`` when a matching NOTE_ON (velocity > 0) arrives.
+    """Calls a per-note callback when a matching NOTE_ON (velocity > 0) arrives.
 
-    Matches note ``note`` on any channel in ``channels`` (1-indexed, e.g. 1-4).
+    ``handlers`` maps note number -> callback. Matches on any channel in
+    ``channels`` (1-indexed, e.g. 1-4).
+
+    Multiple notes matter because the drop-arm pad and the label pad must be
+    DIFFERENT keys: a pad that forces the phrase to "drop" also makes the
+    measured cue latency zero by construction on exactly the bars you marked,
+    so it cannot double as ground truth for how late the model was.
     """
 
     def __init__(
         self,
-        on_note: Callable[[], None],
+        handlers: dict[int, Callable[[], None]],
         port_match: str = "DDJ-GRV6",
-        note: int = 61,
         channels: tuple[int, ...] = (1, 2, 3, 4),
     ) -> None:
-        self._on_note = on_note
+        self._handlers = dict(handlers)
         self._port_match = port_match
-        self._note = note
         self._channels = {c - 1 for c in channels}  # mido channels are 0-indexed
         self._port = None
 
@@ -42,10 +46,11 @@ class MidiNoteListener:
         if (
             msg.type == "note_on"
             and msg.velocity > 0
-            and msg.note == self._note
             and msg.channel in self._channels
         ):
-            self._on_note()
+            handler = self._handlers.get(msg.note)
+            if handler is not None:
+                handler()
 
     def start(self) -> bool:
         """Open the port with a callback. Returns False if no port matched."""
@@ -56,7 +61,8 @@ class MidiNoteListener:
             return False
         self._port = mido.open_input(name, callback=self._on_message)
         chans = sorted(c + 1 for c in self._channels)
-        print(f"MIDI: listening on '{name}' note {self._note} ch {chans}")
+        notes = sorted(self._handlers)
+        print(f"MIDI: listening on '{name}' notes {notes} ch {chans}")
         return True
 
     def stop(self) -> None:

@@ -37,6 +37,18 @@ class AudioCapture:
 
         self._channel_peaks: list[float] = [0.0] * len(self._channel_indices)
 
+    @property
+    def write_pos(self) -> int:
+        """Total samples written since start. Stamps a downbeat to the exact audio
+        sample it was decided on — needed to align a recording with the event log
+        to better than the input latency."""
+        return self._write_pos
+
+    @property
+    def stream_latency(self) -> float:
+        """Actual PortAudio input latency in seconds (0.0 before start())."""
+        return float(self._stream.latency) if self._stream is not None else 0.0
+
     def _callback(
         self,
         indata: np.ndarray,
@@ -76,6 +88,20 @@ class AudioCapture:
             callback=self._callback,
         )
         self._stream.start()
+        # PortAudio may negotiate a different rate than requested: on CoreAudio a
+        # shared aggregate/loopback device runs at whatever rate opened it first.
+        # A silent 48kHz stream makes every "8-beat" window 7.35 beats and
+        # time-scales all content ~8.8% — permanently out of distribution.
+        actual = float(self._stream.samplerate)
+        lat = self._stream.latency
+        print(f"Audio: {actual:.0f} Hz, input latency {float(lat) * 1000:.1f} ms")
+        if abs(actual - self._sample_rate) > 1.0:
+            print(
+                f"  WARNING: requested {self._sample_rate} Hz but the device "
+                f"negotiated {actual:.0f} Hz. Windows will be the wrong musical "
+                f"length and predictions will be unreliable. Pick a device "
+                f"running at {self._sample_rate} Hz."
+            )
 
     def stop(self) -> None:
         """Stop and close the audio stream."""

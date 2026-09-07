@@ -104,6 +104,13 @@ class SeqInferenceEngine:
         self._model.eval()
         self._state: tuple | None = None
 
+        # Warm up (first MPS call compiles Metal shaders). Without this the first
+        # downbeat of the night pays shader compilation while the set is running.
+        # Use a realistic live width, not FIXED_FRAMES: the encoder takes a
+        # different path when frames % FIXED_FRAMES != 0 (model.py:62).
+        with torch.no_grad():
+            self._model.step(torch.zeros(1, N_MELS, 323, device=device))
+
     def reset(self) -> None:
         """Clear the LSTM state — call at track start (or after a long gap)."""
         self._state = None
@@ -112,6 +119,10 @@ class SeqInferenceEngine:
         """Advance one downbeat from a precomputed mel window [n_mels, frames]."""
         with torch.no_grad():
             out, self._state = self._model.step(mel_window.to(self._device), self._state)
+        return self._to_result(out)
+
+    @staticmethod
+    def _to_result(out) -> PredictionResult:
         cprob = torch.softmax(out.current_phrase_logits[0], dim=-1)
         nprob = torch.softmax(out.next_phrase_logits[0], dim=-1)
         ci = int(cprob.argmax()); ni = int(nprob.argmax())
@@ -123,6 +134,20 @@ class SeqInferenceEngine:
             beats_until=float(torch.expm1(out.beats_until[0, 0])),
             current_probs=tuple(cprob.tolist()),
         )
+
+    def peek_window(self, mel_window: torch.Tensor) -> PredictionResult:
+        """Query the heads for a window WITHOUT advancing the LSTM state.
+
+        Used for sub-bar speculative reads: the committed trajectory keeps the
+        one-step-per-downbeat cadence the model was trained on, while this reads
+        "what would the heads say if this window were the current downbeat" off
+        the last committed (h, c). ``UnifiedSeqPredictor.step`` returns the new
+        state separately and never stores it (model.py:181-203), so simply
+        discarding the return leaves ``self._state`` untouched.
+        """
+        with torch.no_grad():
+            out, _ = self._model.step(mel_window.to(self._device), self._state)
+        return self._to_result(out)
 
     def predict(self, audio_samples: np.ndarray, bpm: float) -> PredictionResult:
         """Advance one downbeat from the trailing CONTEXT_BEATS of live audio."""
