@@ -35,6 +35,7 @@ class SpectrogramEncoder(nn.Module):
         channels: list[int] = ENCODER_CHANNELS,
     ) -> None:
         super().__init__()
+        self.fixed_frames = fixed_frames
         self.pool_time = nn.AdaptiveAvgPool1d(fixed_frames)
 
         layers: list[nn.Module] = []
@@ -54,7 +55,14 @@ class SpectrogramEncoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Input: [batch, n_mels, variable_frames]. Output: [batch, seq_len, channels]."""
-        x = self.pool_time(x)  # [batch, n_mels, fixed_frames]
+        # AdaptiveAvgPool1d on MPS requires the input length be divisible by the
+        # output size; live/eval windows are arbitrary widths (~344 frames for an
+        # 8-beat window). Compute the pool on CPU in that case (cheap) to stay
+        # numerically exact, rather than padding (which would dilute the last bin).
+        if x.device.type == "mps" and x.shape[-1] % self.fixed_frames != 0:
+            x = self.pool_time(x.cpu()).to(x.device)  # [batch, n_mels, fixed_frames]
+        else:
+            x = self.pool_time(x)  # [batch, n_mels, fixed_frames]
         x = self.conv(x)  # [batch, out_channels, seq_len]
         x = x.permute(0, 2, 1)  # [batch, seq_len, out_channels]
         return x

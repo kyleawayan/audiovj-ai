@@ -577,6 +577,13 @@ def run_live(
     onset_threshold: float = typer.Option(
         0.30, help="Load-bearing onset threshold for transition cueing (locked operating point)"
     ),
+    auto_gain: bool = typer.Option(
+        True, "--auto-gain/--no-auto-gain",
+        help="Auto-normalize the feed to training level (tracks loud sections, self-corrects mid-set volume changes)."
+    ),
+    input_gain_db: float = typer.Option(
+        0.0, help="Fixed manual gain (dB) trim on top of auto-gain. Use with --no-auto-gain for a fixed level."
+    ),
 ) -> None:
     """Start real-time phrase detection from live audio."""
     from audiovj.live.pipeline import LivePipeline
@@ -621,5 +628,7 @@ def run_live(
         sticky_beats=sticky_beats,
         warmup_beats=warmup_beats,
         onset_threshold=onset_threshold,
+        input_gain_db=input_gain_db,
+        auto_gain=auto_gain,
     )
     pipeline.run()
