@@ -595,6 +595,13 @@ def run_live(
     ma3_speedmaster: str = typer.Option(
         "3.1", help="SpeedMaster to sync BPM to (e.g. 3.1). Empty to disable BPM sync."
     ),
+    midi_port: str = typer.Option(
+        "DDJ-GRV6", help="MIDI input port (substring match) for the manual drop-arm pad. Empty to disable."
+    ),
+    midi_note: int = typer.Option(61, help="MIDI note number that arms a drop (channels 1-4)"),
+    force_drop_beats: int = typer.Option(
+        32, help="How many beats a manually-armed drop is held before the model resumes"
+    ),
 ) -> None:
     """Start real-time phrase detection from live audio."""
     from audiovj.live.pipeline import LivePipeline
@@ -646,5 +653,8 @@ def run_live(
         ma3_prefix=ma3_prefix,
         ma3_on_value=ma3_on_value,
         ma3_speedmaster=ma3_speedmaster,
+        midi_port=midi_port,
+        midi_note=midi_note,
+        force_drop_beats=force_drop_beats,
     )
     pipeline.run()

@@ -89,6 +89,9 @@ class LivePipeline:
         ma3_prefix: str = "gma3",
         ma3_on_value: float = 1.0,
         ma3_speedmaster: str = "3.1",
+        midi_port: str = "DDJ-GRV6",
+        midi_note: int = 61,
+        force_drop_beats: int = 32,
     ) -> None:
         if torch.cuda.is_available():
             device = torch.device("cuda")
@@ -144,6 +147,18 @@ class LivePipeline:
             warmup_beats=warmup_beats,
         )
 
+        # Manual drop-arm from a MIDI pad: press -> force "drop" starting at the
+        # next downbeat for force_drop_beats, then resume model output.
+        self._force_armed = False       # set by the MIDI thread on a pad press
+        self._force_remaining = 0       # downbeats left in the forced window
+        self._force_downbeats = max(1, force_drop_beats // 4)  # 4/4 bars
+        self._midi = None
+        if midi_port:
+            from audiovj.live.midi import MidiNoteListener
+            self._midi = MidiNoteListener(
+                on_note=self._arm_drop, port_match=midi_port, note=midi_note
+            )
+
         self._downbeat_queue: queue.Queue[DownbeatEvent] = queue.Queue()
         self._carabiner = CarabinerClient(
             host=carabiner_host,
@@ -156,6 +171,10 @@ class LivePipeline:
         self._countdown_at_downbeat: float | None = None
         self._countdown_phrase_display: str = ""
         self._sm_debug: str = ""
+
+    def _arm_drop(self) -> None:
+        """MIDI callback (background thread): arm a forced drop at the next downbeat."""
+        self._force_armed = True
 
     def _draw_status(self) -> None:
         """Draw the status bar on the reserved bottom 2 lines."""
@@ -209,6 +228,8 @@ class LivePipeline:
         print("Connecting to Carabiner...")
         self._carabiner.start()
 
+        if self._midi is not None and not self._midi.start():
+            print(f"MIDI: no input port matched '{self._midi._port_match}' — manual drop-arm disabled")
         self._osc.send_status("running")
         print("Live pipeline running. Press Ctrl+C to stop.\n")
 
@@ -239,6 +260,18 @@ class LivePipeline:
                     audio_window = audio_window * self._input_gain
 
                 prediction = self._engine.predict(audio_window, evt.bpm)
+
+                # Manual drop-arm: a pad press arms the NEXT downbeat (this one),
+                # then we hold "drop" for the configured window before handing
+                # control back to the model.
+                if self._force_armed:
+                    self._force_armed = False
+                    self._force_remaining = self._force_downbeats
+                forced_drop = self._force_remaining > 0
+                if forced_drop:
+                    self._force_remaining -= 1
+                effective_phrase = "drop" if forced_drop else prediction.current_phrase
+
                 # Onset cueing owns transitions / drop_start / drop_end / buildup.
                 cue_events = self._cue.update(prediction)
                 # SM owns only the countdown / drop-incoming anticipation here.
@@ -254,8 +287,9 @@ class LivePipeline:
                 self._osc.send_beat(evt.bpm)
 
                 # grandMA3: light the executor for the current phrase + sync BPM.
+                # During a manual drop-arm the forced phrase wins over the model.
                 if self._ma3 is not None:
-                    self._ma3.set_phrase(prediction.current_phrase)
+                    self._ma3.set_phrase(effective_phrase)
                     self._ma3.set_bpm(evt.bpm)
 
                 # Update status bar phrase info
@@ -284,6 +318,9 @@ class LivePipeline:
                         state_indicator = f"  >>> {event.phrase.upper()}"
                     elif event.kind == "anticipate":
                         state_indicator = f"  ... {event.phrase} in ~{event.beats_until:.0f} beats"
+                if forced_drop:
+                    held = (self._force_remaining + 1) * 4
+                    state_indicator = f"  !!! MANUAL DROP ({held} beats left)"
 
                 print(
                     f"[{self._state.running_phrase:<12}] "
@@ -301,6 +338,8 @@ class LivePipeline:
             if self._ma3 is not None:
                 self._ma3.all_off()
             self._osc.send_status("stopped")
+            if self._midi is not None:
+                self._midi.stop()
             self._carabiner.stop()
             self._audio.stop()
             _teardown_scroll_region()
