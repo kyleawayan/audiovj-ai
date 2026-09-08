@@ -461,6 +461,9 @@ def evaluate_seq(
     onset_threshold: float = 0.30,
     fold: int | None = None,
     limit: int | None = None,
+    tolerance: float = 2.0,
+    drop_confirm: int = 1,
+    drop_release: int = 2,
 ) -> dict:
     """Offline twin of the live path: drives the PRODUCTION components
     (SeqInferenceEngine stateful streaming + OnsetCueTracker @onset_threshold)
@@ -501,11 +504,38 @@ def evaluate_seq(
     if limit is not None:
         tracks = tracks[:limit]
 
-    det = tot = fires = near = 0
-    lat: list[float] = []
-    per = {p: [0, 0] for p in lb}  # phrase -> [detected, total]
-    drop_starts = drop_ends = 0
+    # Collect RAW SIGNED deltas once, derive every metric post-hoc. The previous
+    # version folded matching, tolerance and averaging into one pass with abs()
+    # and a hardcoded 8-beat window, which made it blind to the very thing the
+    # live path was changed to fix (a 4-beat lateness) and unable to distinguish
+    # "fired 4 beats early" from "fired 4 beats late".
+    #
+    # Sign convention throughout: POSITIVE = LATE (fire after the boundary).
+    boundaries: list[tuple[str, float | None]] = []   # (phrase, signed delta | None)
+    fire_offsets: list[float] = []                    # per fire -> signed dist to nearest boundary
+    drop_start_offsets: list[float | None] = []       # per actual drop -> signed delta
+    drop_end_offsets: list[float | None] = []         # per actual drop exit -> signed delta
+    n_drop_start_fires = n_drop_end_fires = 0
+    fires = 0
     n_tracks = 0
+
+    def _nearest(targets: list[float], x: float, bd: float) -> float | None:
+        """Signed distance (beats) from x to the nearest element of targets."""
+        if not targets:
+            return None
+        best = min(targets, key=lambda y: abs(y - x))
+        return (x - best) / bd
+
+    def _fire_delta(fire_times: list[float], boundary: float, bd: float) -> float | None:
+        """Signed beats from a boundary to the nearest fire. POSITIVE = LATE.
+
+        Distinct from _nearest's argument order on purpose: every boundary metric
+        asks "how late was the cue", so the boundary is the reference, not the fire.
+        """
+        if not fire_times:
+            return None
+        best = min(fire_times, key=lambda f: abs(f - boundary))
+        return (best - boundary) / bd
 
     for track in tracks:
         samples = _track_windows(track, FEATURES_DIR)
@@ -513,39 +543,116 @@ def evaluate_seq(
             continue
         n_tracks += 1
         engine.reset()
-        cue = OnsetCueTracker(onset_threshold=onset_threshold)
+        cue = OnsetCueTracker(
+            onset_threshold=onset_threshold,
+            drop_confirm=drop_confirm,
+            drop_release=drop_release,
+        )
         bd = 60.0 / track.bpm
         fire_times: list[float] = []
+        drop_start_times: list[float] = []
+        drop_end_times: list[float] = []
         for t, _lbl, window in samples:
             pred = engine.step_window(window)
             for e in cue.update(pred):
                 if e.kind == "transition":
                     fire_times.append(t)
                 elif e.kind == "drop_start":
-                    drop_starts += 1
+                    drop_start_times.append(t)
                 elif e.kind == "drop_end":
-                    drop_ends += 1
+                    drop_end_times.append(t)
+        n_drop_start_fires += len(drop_start_times)
+        n_drop_end_fires += len(drop_end_times)
+
         cues = [(c.start_time, c.phrase_type) for c in track.cue_points]
+        cue_times = [c0 for c0, _ in cues]
         fires += len(fire_times)
         for f in fire_times:
-            if cues and min(abs(c0 - f) / bd for c0, _ in cues) <= 8:
-                near += 1
+            d = _nearest(cue_times, f, bd)
+            if d is not None:
+                fire_offsets.append(d)
+
+        # Transition boundaries. cues[1:] because the first cue is the track's
+        # own start, not a transition anyone could cue on.
         for c0, ph in cues[1:]:
             if ph not in lb_set:
                 continue
-            tot += 1; per[ph][1] += 1
-            if fire_times and min(abs(f - c0) / bd for f in fire_times) <= 8:
-                det += 1; per[ph][0] += 1
-                lat.append(min(abs(f - c0) / bd for f in fire_times))
+            boundaries.append((ph, _fire_delta(fire_times, c0, bd)))
+
+        # Drop entries, and drop EXITS (the cue immediately following a drop).
+        # These were previously only COUNTED, so the two events the rig cares
+        # most about had no timing number at all.
+        for i, (c0, ph) in enumerate(cues):
+            if ph != "drop":
+                continue
+            drop_start_offsets.append(_fire_delta(drop_start_times, c0, bd))
+            if i + 1 < len(cues):
+                drop_end_offsets.append(_fire_delta(drop_end_times, cues[i + 1][0], bd))
+
+    def _stats(deltas: list[float | None], tol: float,
+               match_window: float = 8.0) -> dict:
+        """Recall at ``tol``, latency distribution over a WIDER ``match_window``.
+
+        These must be separate. Measuring latency only over items already inside
+        a tight tolerance is circular: a +/-2 beat tolerance can never reveal a
+        4-beat lateness, because everything that survives the filter is within 2
+        beats by construction. So: recall answers "did it fire near this
+        boundary at all", the distribution answers "and how late was it".
+        """
+        matched = [d for d in deltas if d is not None and abs(d) <= tol]
+        paired = [d for d in deltas if d is not None and abs(d) <= match_window]
+        n = len(deltas)
+        out = {
+            "n": n,
+            "matched": len(matched),
+            "recall": len(matched) / max(n, 1) * 100,
+            "paired": len(paired),
+        }
+        if paired:
+            srt = sorted(paired)
+            out["median_beats"] = srt[len(srt) // 2]
+            out["mean_beats"] = sum(srt) / len(srt)
+            out["p90_abs_beats"] = sorted(abs(d) for d in srt)[int(0.9 * (len(srt) - 1))]
+            out["pct_late"] = sum(1 for d in srt if d > 0) / len(srt) * 100
+            out["pct_early"] = sum(1 for d in srt if d < 0) / len(srt) * 100
+        else:
+            out |= {"median_beats": 0.0, "mean_beats": 0.0, "p90_abs_beats": 0.0,
+                    "pct_late": 0.0, "pct_early": 0.0}
+        return out
+
+    trans = _stats([d for _, d in boundaries], tolerance)
+    per_class = {}
+    for p in lb:
+        ds = [d for ph, d in boundaries if ph == p]
+        st = _stats(ds, tolerance)
+        # Report the denominator: a 0% with n=0 is undefined, not a failure.
+        per_class[p] = {"recall": st["recall"], "n": st["n"],
+                        "median_beats": st["median_beats"]}
+
+    near = sum(1 for d in fire_offsets if abs(d) <= tolerance)
+
+    # Recall is a strong function of tolerance; a single number hides that the
+    # misses are mostly near-misses with timing scatter rather than blindness.
+    sweep = {
+        t: _stats([d for _, d in boundaries], t)["recall"]
+        for t in (1.0, 2.0, 3.0, 4.0, 6.0, 8.0)
+    }
 
     return {
         "n_tracks": n_tracks,
         "fold": fold,
-        "lb_transition_recall": det / max(tot, 1) * 100,
+        "tolerance_beats": tolerance,
+        "lb_transition_recall": trans["recall"],
         "fire_precision": near / max(fires, 1) * 100,
-        "matched_latency_beats": sum(lat) / max(len(lat), 1),
+        # Kept for continuity with older runs: mean ABSOLUTE matched latency.
+        "matched_latency_beats": abs(trans["mean_beats"]),
+        "transition": trans,
         "fires": fires,
-        "per_class_recall": {p: per[p][0] / max(per[p][1], 1) * 100 for p in lb},
-        "drop_start_events": drop_starts,
-        "drop_end_events": drop_ends,
+        "per_class_recall": {p: per_class[p]["recall"] for p in lb},
+        "per_class": per_class,
+        "recall_by_tolerance": sweep,
+        "drop_start": _stats(drop_start_offsets, tolerance),
+        "drop_end": _stats(drop_end_offsets, tolerance),
+        "drop_start_events": n_drop_start_fires,
+        "drop_end_events": n_drop_end_fires,
     }

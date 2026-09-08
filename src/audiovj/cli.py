@@ -267,23 +267,49 @@ def evaluate_seq(
     onset_threshold: float = typer.Option(0.30, help="LB onset threshold (locked operating point)"),
     fold: int = typer.Option(None, help="Restrict to one Raveform fold (e.g. 7 for held-out certification)"),
     limit: int = typer.Option(None, help="Cap number of tracks"),
+    tolerance: float = typer.Option(
+        2.0,
+        help="Match window in BEATS for counting a boundary as detected. Was "
+             "hardcoded at 8 (two bars) — wider than the defect being measured.",
+    ),
+    drop_confirm: int = typer.Option(
+        1, help="Mirror run-live's --drop-confirm so the twin can A/B it offline"
+    ),
+    drop_release: int = typer.Option(2, help="Mirror run-live's --drop-release"),
 ) -> None:
     """Offline twin of run-live: stateful seq inference + onset cueing on labeled
-    tracks. Reports the locked operating point (LB transition recall etc.)."""
+    tracks. Reports SIGNED cue latency (+ = late) at a chosen beat tolerance."""
     from audiovj.evaluate import evaluate_seq as _evaluate_seq
 
-    r = _evaluate_seq(checkpoint=checkpoint, onset_threshold=onset_threshold, fold=fold, limit=limit)
+    r = _evaluate_seq(checkpoint=checkpoint, onset_threshold=onset_threshold,
+                      fold=fold, limit=limit, tolerance=tolerance,
+                      drop_confirm=drop_confirm, drop_release=drop_release)
     if "error" in r:
         typer.echo(f"Error: {r['error']}")
         raise typer.Exit(1)
-    typer.echo(f"Seq pipeline (onset@{onset_threshold}) on {r['n_tracks']} tracks"
+
+    def _timing(label: str, st: dict) -> None:
+        typer.echo(
+            f"  {label:<20}: {st['recall']:5.1f}% caught ({st['matched']}/{st['n']})"
+            f"   median {st['median_beats']:+.2f}b   p90 |{st['p90_abs_beats']:.2f}|b"
+            f"   {st['pct_late']:.0f}% late / {st['pct_early']:.0f}% early"
+        )
+
+    typer.echo(f"Seq pipeline (onset@{onset_threshold}, tolerance +/-{tolerance:g} beats) "
+               f"on {r['n_tracks']} tracks"
                + (f" (fold {r['fold']})" if r["fold"] is not None else "") + ":")
-    typer.echo(f"  LB transition recall : {r['lb_transition_recall']:.1f}%")
-    typer.echo(f"  fire precision       : {r['fire_precision']:.1f}%")
-    typer.echo(f"  matched latency      : {r['matched_latency_beats']:.1f} beats  (fires {r['fires']})")
+    typer.echo("  sign convention      : + = LATE (fired after the boundary)")
+    _timing("LB transition", r["transition"])
+    _timing("drop_start", r["drop_start"])
+    _timing("drop_end", r["drop_end"])
+    typer.echo(f"  fire precision       : {r['fire_precision']:.1f}%  ({r['fires']} fires)")
     typer.echo("  per-class recall     : "
-               + "  ".join(f"{k} {v:.0f}%" for k, v in r["per_class_recall"].items()))
-    typer.echo(f"  drop events          : {r['drop_start_events']} starts / {r['drop_end_events']} ends")
+               + "  ".join(f"{k} {v['recall']:.0f}% (n={v['n']})"
+                           for k, v in r["per_class"].items()))
+    typer.echo("  recall by tolerance  : "
+               + "  ".join(f"+/-{t:g}b {v:.0f}%" for t, v in r["recall_by_tolerance"].items()))
+    typer.echo(f"  cue events fired     : {r['drop_start_events']} drop_start / "
+               f"{r['drop_end_events']} drop_end")
 
 
 @app.command()
@@ -626,6 +652,23 @@ def run_live(
     event_log: str = typer.Option(
         None, help="Append a JSONL record per downbeat (probs, events, marks) to this path."
     ),
+    record_dir: str = typer.Option(
+        None,
+        help="Record a full session (audio.wav + events.jsonl + manifest.json) into "
+             "a timestamped folder under this directory. Everything needed to redo "
+             "any offline analysis without playing another set.",
+    ),
+    verbose: bool = typer.Option(
+        False, "--verbose/--quiet",
+        help="Print a full diagnostic line every downbeat (probs, gain, grid flags). "
+             "Off by default: the status bar carries the live state and the console "
+             "only reports phrase CHANGES.",
+    ),
+    record_audio: bool = typer.Option(
+        True, "--record-audio/--no-record-audio",
+        help="Write the captured mono feed (pre-gain) alongside the event log. "
+             "~635 MB/hour float32. Disable to log events only.",
+    ),
     reset_state_beats: int = typer.Option(
         0,
         help="Reset the LSTM context every N beats. 0 = never (current behaviour). "
@@ -635,6 +678,7 @@ def run_live(
 ) -> None:
     """Start real-time phrase detection from live audio."""
     from audiovj.live.pipeline import LivePipeline
+    from audiovj.live.recorder import SessionRecorder
 
     # Default to the production seq model (UnifiedSeqPredictor); the old 8-beat
     # phrase_predictor is not wired into the streaming path.
@@ -692,6 +736,10 @@ def run_live(
         drop_light_threshold=drop_light_threshold,
         drop_light_hold=drop_light_hold,
         event_log=Path(event_log) if event_log else None,
+        record_dir=(SessionRecorder.new_dir(Path(record_dir).expanduser())
+                    if record_dir else None),
+        record_audio=record_audio,
         reset_state_beats=reset_state_beats,
+        verbose=verbose,
     )
     pipeline.run()

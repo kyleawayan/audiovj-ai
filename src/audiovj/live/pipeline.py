@@ -37,6 +37,26 @@ def _meter_bar(peak: float, width: int = 20) -> str:
     return f"[{bar}] {db:+5.1f}dB"
 
 
+def _prob_meter(p: float, thr: float, width: int = 12) -> str:
+    """Bar for p(drop) with a marker at the firing threshold.
+
+    p(drop) is the only signal on this model with real discriminative power
+    (median 0.28 inside drops vs 0.05 outside, measured on a live set), and it
+    is the number that actually trips the lights. The beats_until head is a
+    constant (~9.9 regardless of true distance) and argmax confidence barely
+    separates right from wrong (0.58 vs 0.54), so neither is worth screen space.
+    """
+    filled = int(max(0.0, min(p, 1.0)) * width)
+    mark = int(max(0.0, min(thr, 1.0)) * width) if thr > 0 else -1
+    cells = []
+    for i in range(width):
+        if i == mark:
+            cells.append("\u2588" if i < filled else "\u2502")   # threshold tick
+        else:
+            cells.append("\u2588" if i < filled else "\u00b7")
+    return f"[{''.join(cells)}] {p:.2f}"
+
+
 def _beat_dots(phase: float) -> str:
     """Render 4 beat indicators showing current position in bar."""
     current_beat = int(phase) % 4
@@ -121,7 +141,10 @@ class LivePipeline:
         drop_light_threshold: float = 0.0,
         drop_light_hold: int = 2,
         event_log: Path | None = None,
+        record_dir: Path | None = None,
+        record_audio: bool = True,
         reset_state_beats: int = 0,
+        verbose: bool = False,
     ) -> None:
         if torch.cuda.is_available():
             device = torch.device("cuda")
@@ -129,6 +152,8 @@ class LivePipeline:
             device = torch.device("mps")
         else:
             device = torch.device("cpu")
+        self._checkpoint_path = Path(checkpoint_path)
+        self._device_name = str(device)
         print(f"Loading model from {checkpoint_path} on {device}...")
         # Stateful streaming seq model: carries cross-downbeat LSTM context.
         self._engine = SeqInferenceEngine(checkpoint_path, device)
@@ -150,8 +175,22 @@ class LivePipeline:
         self._agc_floor = 0.003      # below this peak = silence, hold gain at 1
         self._agc_gain = 1.0         # last applied auto gain (for the status bar)
 
+        # Recorder first: AudioCapture needs its sink at construction, and the
+        # writer thread must be running before the first PortAudio callback or
+        # the opening chunks are dropped.
+        self._recorder = None
+        if record_dir is not None:
+            from audiovj.live.recorder import SessionRecorder
+            self._recorder = SessionRecorder(
+                Path(record_dir), SAMPLE_RATE, record_audio=record_audio
+            )
+            print(f"Recording session -> {self._recorder.dir}")
+
         self._audio = AudioCapture(
-            device=audio_device, channels=audio_channels, sample_rate=SAMPLE_RATE
+            device=audio_device,
+            channels=audio_channels,
+            sample_rate=SAMPLE_RATE,
+            sink=self._recorder.audio_sink if self._recorder else None,
         )
         self._osc = OSCEmitter(osc_host, osc_port)
         # Optional grandMA3 bridge: current phrase -> executor 201-208 (one lit).
@@ -198,13 +237,22 @@ class LivePipeline:
 
         # Manual drop-arm from a MIDI pad: press -> force "drop" starting at the
         # next downbeat for force_drop_beats, then resume model output.
+        # Note 61 is momentary: one press forces "drop" from the next downbeat
+        # for force_drop_beats, then the model resumes. No toggle state to track
+        # mid-set, and a forgotten press cannot pin the lights.
         self._force_armed = False       # set by the MIDI thread on a pad press
         self._force_remaining = 0       # downbeats left in the forced window
         self._force_downbeats = max(1, force_drop_beats // 4)  # 4/4 bars
+        self._label_count = 0
         # Label marks from a SECOND pad. This one only timestamps — it must not
         # force the phrase, or every marked bar reports zero latency by
         # construction and the marks are useless as ground truth.
         self._marks: list[dict] = []
+        self._downbeat_count = 0
+        self._last_downbeat_t: float | None = None
+        self._last_p_drop = 0.0
+        self._last_phrase = ""
+        self._pending_press: dict | None = None
         self._midi = None
         if midi_port:
             from audiovj.live.midi import MidiNoteListener
@@ -221,6 +269,7 @@ class LivePipeline:
             port=carabiner_port,
             on_downbeat=self._downbeat_queue.put,
         )
+        self._record_dir = record_dir
         self._event_log_path = event_log
         self._event_log = None
         self._status_running = False
@@ -229,10 +278,31 @@ class LivePipeline:
         self._countdown_at_downbeat: float | None = None
         self._countdown_phrase_display: str = ""
         self._sm_debug: str = ""
+        self._last_shown: str = ""
+        self._verbose = verbose
 
     def _arm_drop(self) -> None:
-        """MIDI callback (background thread): arm a forced drop at the next downbeat."""
+        """MIDI callback (background thread): force a drop from the next downbeat.
+
+        The press is also the ground-truth drop label. The press instant is not
+        the drop -- it lands ~2-3 beats early -- so the run loop snaps it to the
+        NEXT downbeat and logs a drop_label there.
+
+        Forcing does not corrupt that label: it only overrides
+        ``effective_phrase`` (the MA3 output). ``prediction``,
+        ``OnsetCueTracker`` and the logged prob vector come from audio alone.
+        """
         self._force_armed = True
+        phase = self._carabiner.beat_phase
+        self._pending_press = {
+            "press_t": time.monotonic(),
+            "press_bar_phase": phase,
+            "press_audio_pos": self._audio.write_pos,
+            "press_p_drop": self._last_p_drop,
+            "press_phrase": self._last_phrase,
+            "press_target": "on",
+        }
+        self._marks.append(self._pending_press)
 
     def _mark_drop(self) -> None:
         """MIDI callback (background thread): timestamp a drop WITHOUT forcing it.
@@ -243,21 +313,34 @@ class LivePipeline:
         the previous bar). Those two need opposite fixes, and nothing in the rig
         currently distinguishes them.
         """
+        phase = self._carabiner.beat_phase
         mark = {
             "t": time.monotonic(),
-            "beat_phase": self._carabiner.beat_phase,
+            "beat_phase": phase,
             "bpm": self._carabiner.bpm,
             "audio_pos": self._audio.write_pos,
+            # Context from the last committed downbeat, so a mark can be scored
+            # against what the model believed at the time without re-running it.
+            "downbeat_index": self._downbeat_count,
+            "since_downbeat_s": time.monotonic() - (self._last_downbeat_t or time.monotonic()),
+            "p_drop_at_last_downbeat": self._last_p_drop,
+            "phrase_at_last_downbeat": self._last_phrase,
         }
         self._marks.append(mark)
         self._log_event({"kind": "mark", **mark})
+        # Visible confirmation. Without it there is no way to know mid-set
+        # whether the pad registered, and an unnoticed dead pad costs the set.
+        print(f"  *** MARK #{len(self._marks)} (bar phase {phase:.2f}, "
+              f"pDrop was {self._last_p_drop:.2f})")
 
     def _log_event(self, rec: dict) -> None:
-        """Append one JSON line to the session log, if enabled."""
+        """Append one JSON line to the session log and/or the recorder."""
+        if self._recorder is not None:
+            self._recorder.log(rec)
         if self._event_log is None:
             return
         try:
-            self._event_log.write(json.dumps(rec) + "\n")
+            self._event_log.write(json.dumps(rec, default=str) + "\n")
             self._event_log.flush()
         except Exception:
             pass
@@ -277,13 +360,15 @@ class LivePipeline:
         phrase_info = ""
         if self._display_phrase:
             phrase_info = f"  Current: {self._display_phrase}"
-            if self._countdown_at_downbeat is not None and self._countdown_phrase_display:
-                interpolated = max(0.0, self._countdown_at_downbeat - phase)
-                phrase_info += f"   Next: {self._countdown_phrase_display} in {interpolated:.0f} beats"
-            elif self._display_next:
-                phrase_info += f"   Next: {self._display_next}"
-        if self._sm_debug:
-            phrase_info += f"   [SM {self._sm_debug}]"
+            # No "in N beats": the countdown is seeded from beats_until, which
+            # measured as a constant ~9.9 regardless of true distance.
+            if self._display_next:
+                phrase_info += f"   next? {self._display_next}"
+        # p(drop) with the firing threshold marked, so the lean toward a drop is
+        # visible before the light actually changes.
+        phrase_info += f"   drop {_prob_meter(self._last_p_drop, self._drop_light_thr)}"
+        if self._force_remaining > 0:
+            phrase_info += f"   [MANUAL DROP {self._force_remaining * 4}b]"
 
         if len(channel_peaks) == 2:
             line1 = f"  L {_meter_bar(channel_peaks[0])}  {beats}  {bpm:6.1f} BPM"
@@ -315,6 +400,33 @@ class LivePipeline:
             self._event_log = self._event_log_path.open("a")
             print(f"Event log -> {self._event_log_path}")
 
+        if self._recorder is not None:
+            import hashlib
+            digest = ""
+            try:
+                digest = hashlib.sha256(
+                    self._checkpoint_path.read_bytes()
+                ).hexdigest()[:16]
+            except OSError:
+                pass
+            self._recorder.start({
+                "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "checkpoint": str(self._checkpoint_path),
+                "checkpoint_sha256_16": digest,
+                "device": self._device_name,
+                "sample_rate": SAMPLE_RATE,
+                "context_beats": CONTEXT_BEATS,
+                "phrase_types": list(PHRASE_TYPES),
+                "onset_threshold": self._cue._thr,
+                "drop_confirm": self._cue._confirm,
+                "drop_release": self._cue._release,
+                "drop_light_threshold": self._drop_light_thr,
+                "auto_gain": self._auto_gain,
+                "input_gain": self._input_gain,
+                "reset_state_beats": self._reset_state_beats,
+                "audio_is_pre_gain": True,
+            })
+
         print("Starting audio capture...")
         self._audio.start()
 
@@ -324,6 +436,13 @@ class LivePipeline:
         if self._midi is not None and not self._midi.start():
             print(f"MIDI: no input port matched '{self._midi._port_match}' — manual drop-arm disabled")
         self._osc.send_status("running")
+        if self._recorder is not None:
+            self._recorder.update_manifest({
+                "audio_start_pos": self._audio.write_pos,
+                "input_latency_s": self._audio.stream_latency,
+                "link_peers": self._carabiner.peers,
+                "bpm_at_start": self._carabiner.bpm,
+            })
         self._log_event({
             "kind": "session_start",
             "t": time.monotonic(),
@@ -385,13 +504,39 @@ class LivePipeline:
                 probs = prediction.current_probs or ()
                 p_drop = probs[_DROP_IDX] if probs else 0.0
                 p_buildup = probs[_BUILDUP_IDX] if probs else 0.0
+                self._downbeat_count += 1
+                self._last_downbeat_t = evt.time
+                self._last_p_drop = p_drop
+                self._last_phrase = prediction.current_phrase
 
-                # Manual drop-arm: a pad press arms the NEXT downbeat (this one),
-                # then we hold "drop" for the configured window before handing
-                # control back to the model.
+                # Snap: this downbeat IS the human-labelled drop. Every field
+                # below is the model's UNFORCED belief there, so offline scoring
+                # compares like with like.
                 if self._force_armed:
                     self._force_armed = False
                     self._force_remaining = self._force_downbeats
+                    press = self._pending_press or {}
+                    self._pending_press = None
+                    phase = press.get("press_bar_phase", 0.0)
+                    self._label_count += 1
+                    self._log_event({
+                        "kind": "drop_label",
+                        "label": "drop_start",
+                        "t": evt.time,
+                        "downbeat_index": self._downbeat_count,
+                        "beat": evt.beat_number,
+                        "bpm": evt.bpm,
+                        "audio_pos": audio_pos,
+                        "p_drop_at_label": p_drop,
+                        "phrase_at_label": prediction.current_phrase,
+                        "probs_at_label": list(probs),
+                        # The snap assumes the press landed in the bar right
+                        # before the drop. A press early in the bar may have been
+                        # aimed at the downbeat that just passed, so flag it.
+                        "press_beats_early": 4.0 - phase,
+                        "press_suspect": phase < 0.5,
+                        **press,
+                    })
                 forced_drop = self._force_remaining > 0
                 if forced_drop:
                     self._force_remaining -= 1
@@ -456,7 +601,7 @@ class LivePipeline:
                     self._ma3.set_bpm(evt.bpm)
 
                 # Update status bar phrase info
-                self._display_phrase = self._state.running_phrase
+                self._display_phrase = effective_phrase
                 countdown = self._state.countdown
                 if countdown:
                     self._countdown_phrase_display = countdown[0]
@@ -482,22 +627,30 @@ class LivePipeline:
                     elif event.kind == "anticipate":
                         state_indicator = f"  ... {event.phrase} in ~{event.beats_until:.0f} beats"
                 if forced_drop:
-                    held = (self._force_remaining + 1) * 4
-                    state_indicator = f"  !!! MANUAL DROP ({held} beats left)"
+                    state_indicator = (f"  !!! MANUAL DROP "
+                                       f"({(self._force_remaining + 1) * 4} beats left)")
 
-                # p(drop) is the number that decides whether the lateness is the
-                # model failing to anticipate or the argmax hiding an anticipation
-                # it already made. Print it every downbeat.
-                grid_flag = " !GRID" if evt.irregular else ""
-                print(
-                    f"[{self._state.running_phrase:<12}] "
-                    f"current={prediction.current_phrase:<12} ({prediction.current_confidence:.0%})  "
-                    f"pDrop={p_drop:.2f} pBuild={p_buildup:.2f}  "
-                    f"next={prediction.next_phrase:<12} ({prediction.next_confidence:.0%})  "
-                    f"beats_until={prediction.beats_until:.0f}  "
-                    f"gain={20.0 * math.log10(max(self._agc_gain, 1e-9)):+.0f}dB"
-                    f"{grid_flag}{state_indicator}"
-                )
+                # One line per phrase CHANGE, not per downbeat. A per-downbeat
+                # report is unreadable mid-set; --verbose brings it back for
+                # debugging. The status bar carries the live state.
+                if self._verbose:
+                    grid = " !GRID" if evt.irregular else ""
+                    print(
+                        f"[{effective_phrase:<12}] "
+                        f"current={prediction.current_phrase:<12} "
+                        f"({prediction.current_confidence:.0%})  "
+                        f"pDrop={p_drop:.2f} pBuild={p_buildup:.2f}  "
+                        f"next={prediction.next_phrase:<12}  "
+                        f"beats_until={prediction.beats_until:.0f}  "
+                        f"gain={20.0 * math.log10(max(self._agc_gain, 1e-9)):+.0f}dB"
+                        f"{grid}{state_indicator}"
+                    )
+                elif effective_phrase != self._last_shown:
+                    self._last_shown = effective_phrase
+                    cd = self._state.countdown
+                    nxt = f"   next {cd[0]} in {cd[1]:.0f}" if cd else ""
+                    tag = "  [MANUAL]" if forced_drop else ""
+                    print(f"  {evt.bpm:5.1f} BPM   {effective_phrase}{nxt}{tag}")
 
         except KeyboardInterrupt:
             pass
@@ -510,16 +663,44 @@ class LivePipeline:
                 self._midi.stop()
             self._carabiner.stop()
             self._audio.stop()
-            self._log_event({"kind": "session_end", "t": time.monotonic(),
-                             "marks": len(self._marks)})
+            if self._recorder is not None:
+                self._recorder.close({
+                    "t": time.monotonic(),
+                    "marks": len(self._marks),
+                    "downbeats": self._downbeat_count,
+                })
+                print(f"Session recorded -> {self._recorder.dir}")
+                if self._recorder.dropped_chunks:
+                    print(f"  WARNING: dropped {self._recorder.dropped_chunks} "
+                          f"audio chunks (disk too slow) — recording has gaps")
+            else:
+                self._log_event({"kind": "session_end", "t": time.monotonic(),
+                                 "marks": len(self._marks)})
             if self._event_log is not None:
                 self._event_log.close()
                 self._event_log = None
             _teardown_scroll_region()
-            if self._marks:
-                phases = [m["beat_phase"] for m in self._marks]
+            # Two record shapes share this list: arm presses (note 61, which
+            # snap forward to the next downbeat) and marks from the optional
+            # non-forcing pad. They mean different things, so report separately
+            # -- and read defensively, because crashing here would lose the
+            # whole session at the moment it is being closed.
+            arms = [m for m in self._marks if "press_bar_phase" in m]
+            marks = [m for m in self._marks if "beat_phase" in m]
+            if arms:
+                early = [4.0 - m["press_bar_phase"] for m in arms]
+                avg = sum(early) / len(early)
+                suspect = sum(1 for m in arms if m["press_bar_phase"] < 0.5)
+                print(f"{len(arms)} drop labels (note 61), pressed on average "
+                      f"{avg:.1f} beats before the downbeat they snapped to.")
+                if suspect:
+                    print(f"  {suspect} press(es) landed early in the bar and may "
+                          f"have been aimed at the previous downbeat — "
+                          f"flagged press_suspect in the log.")
+            if marks:
+                phases = [m["beat_phase"] for m in marks]
                 avg = sum(phases) / len(phases)
-                print(f"{len(self._marks)} drop marks, mean bar phase {avg:.2f} "
-                      f"(near 0 = you press after the downbeat / reacting; "
+                print(f"{len(marks)} non-forcing marks, mean bar phase {avg:.2f} "
+                      f"(near 0 = pressed after the downbeat / reacting; "
                       f"near 3 = before it / anticipating)")
             print("Stopped.")

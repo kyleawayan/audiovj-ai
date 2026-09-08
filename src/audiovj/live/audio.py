@@ -1,5 +1,7 @@
 """Live audio capture with a ring buffer fed by sounddevice."""
 
+from collections.abc import Callable
+
 import numpy as np
 import sounddevice as sd
 
@@ -17,7 +19,12 @@ class AudioCapture:
         channels: list[int] | None = None,
         sample_rate: int = SAMPLE_RATE,
         buffer_size: int = BUFFER_SIZE,
+        sink: "Callable[[np.ndarray], None] | None" = None,
     ) -> None:
+        # ``sink`` receives every mono chunk exactly as the model will see it,
+        # BEFORE any gain is applied. Must not block: it runs on the PortAudio
+        # callback thread (SessionRecorder queues and returns immediately).
+        self._sink = sink
         self._device = device
         self._sample_rate = sample_rate
         self._buffer = np.zeros(buffer_size, dtype=np.float32)
@@ -77,6 +84,9 @@ class AudioCapture:
             self._buffer[: n - first] = mono[first:]
 
         self._write_pos += n
+
+        if self._sink is not None:
+            self._sink(mono)
 
     def start(self) -> None:
         """Open the audio stream and begin capturing."""
